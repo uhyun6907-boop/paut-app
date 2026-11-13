@@ -40,6 +40,7 @@ import {
   addSite,
   selectSite,
   setLineDrafts,
+  unsavedEdits,
   setResult,
   updateMeta,
   useSession,
@@ -157,11 +158,8 @@ export function EntryView() {
   const trail = useMemo(() => walkTrail(prefixRecords), [prefixRecords]);
   const direction: WalkDirection = directionFromTrail(trail) ?? "up";
   const cards = useMemo(() => layoutCards(prefixRecords, drafts, "up"), [prefixRecords, drafts]);
-  const unsaved = useMemo(() => {
-    const locals = records.filter((rec) => rec.sync === "local" && rec.site === site && rec.date === meta.workDate).length;
-    const grey = Object.entries(meta.draftCards ?? {}).filter(([key]) => key.startsWith(`${site}||`)).reduce((sum, [, list]) => sum + list.length, 0);
-    return locals + grey;
-  }, [records, site, meta.workDate, meta.draftCards]);
+  // 미저장 = 사용자가 고친 기록만(회색 미입력 카드는 저장해도 엑셀에 안 써서 세지 않는다).
+  const unsaved = useMemo(() => unsavedEdits(records, { lastSite: site, workDate: meta.workDate }), [records, site, meta.workDate]);
   // 초기화: 마지막 저장 뒤 바꾼 카드 표시가 있을 때만 켠다.
   const resettable = useMemo(() => resettableCount(records, meta), [records, meta]);
   const historyRows = useMemo(() => historyOfLine(lineRecords, historySort, "up"), [lineRecords, historySort]);

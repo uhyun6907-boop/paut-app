@@ -695,15 +695,21 @@ function stampOf(meta: DayMeta): string {
   return [meta.insp1, meta.insp2, meta.dayType, meta.timeStart, meta.timeEnd].join("|");
 }
 
+/**
+ * '저장 · 미저장 N' 의 N: 지금 현장·작업일에 사용자가 고쳤지만 아직 저장하지 않은 기록(sync "local")만 센다.
+ * 회색(미입력) 카드는 세지 않는다 — 날짜가 없는 자리 표시라 저장해도 엑셀에 쓰지 않고 지워지지도 않는다.
+ * (예전에는 현장의 모든 라인·날짜의 회색 카드를 더해, 지난날 + 로 만든 S29~S33 과 S→R 로 따라 만든 R29~R33 이
+ * 아무것도 고치지 않은 다음 날에도 '미저장 10' 으로 계속 보였다.)
+ */
+export function unsavedEdits(records: InspectionRecord[], meta: Pick<DayMeta, "lastSite" | "workDate">): number {
+  return records.filter((rec) => rec.sync === "local" && rec.site === meta.lastSite && rec.date === meta.workDate).length;
+}
+
 export function unsavedCount(): number {
   const { lastSite, workDate } = state.meta;
-  const locals = state.records.filter((rec) => rec.sync === "local" && rec.site === lastSite && rec.date === workDate).length;
-  const grey = Object.entries(state.meta.draftCards ?? {})
-    .filter(([key]) => key.startsWith(`${lastSite}||`))
-    .reduce((sum, [, list]) => sum + list.length, 0);
   const saved = readUnsaved().stamps[`${lastSite}|${workDate}`];
   const metaDirty = saved !== undefined && saved !== stampOf(state.meta) ? 1 : 0;
-  return locals + grey + metaDirty;
+  return unsavedEdits(state.records, state.meta) + metaDirty;
 }
 
 /**
