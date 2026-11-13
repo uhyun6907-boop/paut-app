@@ -1,4 +1,4 @@
-// paut-api — PAUT 앱용 Microsoft 로그인 중계 서버 (Cloudflare Worker)
+// paut-api — PAUT 앱용 Microsoft 로그인 중계 서버 (Cloudflare Worker) · v1
 //
 // 왜: iOS 홈 화면 앱(SPA)은 refresh token 이 24시간이면 끝나고, 숨은 iframe 갱신도 막혀 매일 로그인이 풀린다.
 // 이 서버는 Azure 'Web' 플랫폼(client secret) 으로 로그인을 받아 refresh token 을 서버(KV)에 보관한다.
