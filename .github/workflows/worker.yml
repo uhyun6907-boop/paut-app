@@ -1,5 +1,5 @@
 # worker/ 가 바뀌면 Cloudflare 에 로그인 중계 서버(paut-api)를 배포한다.
-# 필요한 저장소 Secrets: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, AZURE_CLIENT_SECRET
+# 필요한 저장소 Secrets: CLOUDFLARE_API_TOKEN, AZURE_CLIENT_SECRET (Account ID 는 wrangler.toml)
 name: deploy-worker
 
 on:
@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ACCOUNT_ID: 63c88ff42834a81ed5cef4ae0fa83ac2
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
     defaults:
       run:
@@ -26,7 +26,6 @@ jobs:
         run: |
           missing=""
           [ -n "$CLOUDFLARE_API_TOKEN" ] || missing="$missing CLOUDFLARE_API_TOKEN"
-          [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || missing="$missing CLOUDFLARE_ACCOUNT_ID"
           [ -n "$AZURE_CLIENT_SECRET" ] || missing="$missing AZURE_CLIENT_SECRET"
           if [ -n "$missing" ]; then echo "::warning::저장소 Secrets 가 없어 서버 배포를 건너뜁니다:$missing"; echo "ready=false" >> "$GITHUB_OUTPUT"; else echo "ready=true" >> "$GITHUB_OUTPUT"; fi
 

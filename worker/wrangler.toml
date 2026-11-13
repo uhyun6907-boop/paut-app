@@ -2,6 +2,8 @@ name = "paut-api"
 main = "src/index.js"
 compatibility_date = "2025-10-01"
 workers_dev = true
+# Cloudflare Account ID (비밀값 아님)
+account_id = "63c88ff42834a81ed5cef4ae0fa83ac2"
 
 [vars]
 AZURE_CLIENT_ID = "52353295-20fe-41c8-873a-a4dae9c92042"
