@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { Workbox } from "workbox-window";
 import { App } from "./ui/App";
 import { initAuth, resolveClientId } from "./sync/msal";
+import { kvGet } from "./store/db";
 import "./styles.css";
 
 /**
@@ -51,7 +52,10 @@ async function boot(): Promise<void> {
   registerServiceWorker();
   // 화면을 그리기 전에: Microsoft 응답 처리 + 캐시 계정이 있으면 토큰으로 실제 확인(만료면 바로 '로그인 필요').
   // 확인이 오래 걸리면(최대 수 초) 화면부터 띄운다. 실패해도 앱은 뜬다.
-  await initAuth(resolveClientId("")).catch((error) => console.warn("initAuth 실패", error));
+  // 설정에 클라이언트 ID 를 따로 넣었으면 그 ID 로 시작해야 한다. 빈 값으로 시작하면 다른 ID 의 MSAL 이 먼저 떠서
+  // Microsoft 에서 돌아온 응답을 처리하지 못하고(다른 ID 의 로그인으로 보고 건너뜀) 토큰 확인도 엉뚱한 캐시를 본다.
+  const saved = await kvGet<{ clientId?: string }>("config").catch(() => undefined);
+  await initAuth(resolveClientId(saved?.clientId ?? "")).catch((error) => console.warn("initAuth 실패", error));
   createRoot(document.getElementById("root")!).render(
     <StrictMode>
       <App />

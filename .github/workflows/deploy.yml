@@ -1,0 +1,51 @@
+# source 브랜치에 푸시하면: 타입 검사 → 테스트 → GitHub Pages 빌드 → main 브랜치(배포본)에 올린다.
+# Pages 설정은 그대로(main 브랜치 / 루트). main 에는 빌드 결과물만 둔다.
+name: deploy-pages
+
+on:
+  push:
+    branches: [source]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deploy-pages
+  cancel-in-progress: false
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build:pages
+
+      - name: Pages 부가 파일
+        run: |
+          cp dist/index.html dist/404.html
+          touch dist/.nojekyll
+
+      - name: main 브랜치에 배포본 올리기
+        env:
+          SRC_SHA: ${{ github.sha }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git clone --depth 1 --branch main "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" out
+          find out -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -a dist/. out/
+          cd out
+          git add -A
+          if git diff --cached --quiet; then echo "변경 없음"; exit 0; fi
+          git commit -m "deploy: source ${SRC_SHA::7}"
+          git push origin main

@@ -238,12 +238,32 @@ export async function loginRedirect(clientId: string, options: LoginOptions = {}
   const app = await msalApp(clientId);
   await handleRedirectOnce(app);
   const uri = redirectUri();
-  if (options.switchAccount) {
-    await app.loginRedirect({ scopes: GRAPH_SCOPES, redirectUri: uri, prompt: "select_account" });
-    return;
+  const account = options.switchAccount ? null : restoreAccount(app);
+  const request = options.switchAccount
+    ? { scopes: GRAPH_SCOPES, redirectUri: uri, prompt: "select_account" as const }
+    : { scopes: GRAPH_SCOPES, redirectUri: uri, ...(account ? { loginHint: account.username } : {}) };
+  try {
+    await app.loginRedirect(request);
+  } catch (error) {
+    // 지난 로그인이 Microsoft 화면에서 끝나지 않고 끊기면(앱을 닫음·뒤로 감) 'interaction_in_progress' 표시가
+    // localStorage 에 남아 로그인 버튼이 영영 안 먹는다. 그 표시만 지우고 한 번 다시 시도한다(토큰 캐시는 그대로).
+    if (codeOf(error) !== "interaction_in_progress") throw error;
+    console.warn("남은 로그인 진행 표시를 지우고 다시 시도", error);
+    clearStaleInteraction();
+    await app.loginRedirect(request);
   }
-  const account = restoreAccount(app);
-  await app.loginRedirect({ scopes: GRAPH_SCOPES, redirectUri: uri, ...(account ? { loginHint: account.username } : {}) });
+}
+
+/** MSAL 의 '로그인 진행 중' 표시(msal.interaction.status)만 지운다. 계정·토큰은 건드리지 않는다. */
+export function clearStaleInteraction(): void {
+  for (const store of [globalThis.localStorage, globalThis.sessionStorage]) {
+    if (!store) continue;
+    try {
+      for (const key of Object.keys(store)) if (key.endsWith("interaction.status")) store.removeItem(key);
+    } catch {
+      /* 저장소 접근 불가 */
+    }
+  }
 }
 
 export async function logoutRedirect(clientId: string): Promise<void> {
