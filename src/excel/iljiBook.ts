@@ -155,6 +155,53 @@ export function readDayStaff(files: ZipFiles): Record<string, { insp1: string; i
   return out;
 }
 
+/** 작업일지 하루: 검사자(근무자)·근무시간·구분. 읽기만 한다. */
+export interface WorkLogDay {
+  date: string;
+  dayType: string;
+  workers: string[];
+  timeStart: string;
+  timeEnd: string;
+}
+
+/** 근무시간 칸 → 'HH:MM'. 엑셀 시간(0.375)·'9:00' 글자 모두. 모르면 빈 글자. */
+function timeText(v: string | undefined): string {
+  const t = (v ?? "").trim();
+  if (!t) return "";
+  if (/^\d+(\.\d+)?$/.test(t)) {
+    const n = Number(t);
+    return n > 0 && n < 1 ? excelTimeToHHMM(n) : "";
+  }
+  const m = /^(\d{1,2}):(\d{2})/.exec(t);
+  return m ? `${m[1].padStart(2, "0")}:${m[2]}` : "";
+}
+
+/**
+ * 작업일지에서 날짜별 근무자·근무시간(읽기만). 같은 날짜가 여러 행이면 비어 있지 않은 값을 모은다.
+ * 근무자도 시간도 없는 날은 넣지 않는다.
+ */
+export function readWorkLog(files: ZipFiles): Record<string, WorkLogDay> {
+  const { cells } = readSheet(files, findIljiSheet(files));
+  const staff = detectStaffColumns(cells);
+  const out: Record<string, WorkLogDay> = {};
+  for (const snap of snapshotRows(cells)) {
+    if (!snap.date) continue;
+    const names = [staff.insp1, staff.insp2].map((c) => singleInspectorName(snap.values.get(c) || "")).filter((n) => n && !/^\d/.test(n));
+    const start = timeText(snap.values.get(staff.start));
+    const end = timeText(snap.values.get(staff.end));
+    if (!names.length && !start && !end) continue;
+    const prev = out[snap.date];
+    out[snap.date] = {
+      date: snap.date,
+      dayType: prev?.dayType || snap.dayType,
+      workers: [...new Set([...(prev?.workers ?? []), ...names])],
+      timeStart: prev?.timeStart || start,
+      timeEnd: prev?.timeEnd || end,
+    };
+  }
+  return out;
+}
+
 export function readInspectors(files: ZipFiles): string[] {
   const name = findIljiSheet(files);
   const { cells } = readSheet(files, name);

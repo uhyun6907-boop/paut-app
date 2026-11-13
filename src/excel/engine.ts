@@ -3,7 +3,7 @@ import { isoToExcelSerial, parseFlexibleDate } from "../domain/dates";
 import type { AppConfig, DayMeta, DayStaff, FileSteps, InspectionRecord, ListBookKind, SyncFile, SyncReport, SyncStatus } from "../domain/types";
 import { FAIL, LIST_BOOKS, LIST_BOOK_LABEL, LIST_GM_FILE, PASS, SYNC_FILE_LABEL } from "../domain/types";
 import { findMonthSheet, isRemovedSite, mappingFor, REMOVED_SITE_MAPPINGS } from "../domain/mapping";
-import { readDayStaff, readInspectors, applyIljiDay, findIljiSheet, readIljiDay, type IljiGroup } from "./iljiBook";
+import { readDayStaff, readInspectors, readWorkLog, applyIljiDay, findIljiSheet, readIljiDay, type IljiGroup, type WorkLogDay } from "./iljiBook";
 import { appIdRows, LIST_LAYOUT, listBookOf, listDiameterValue, listSheetOf, orderForAppend, parseListWorkbook, planLineReorder, writeListRow, type ListWrite } from "./listBook";
 import { dropCalcChain, readSheet, shiftRowNumbers, unzipXlsx, workbookSheets, zipXlsx, type ZipFiles } from "./ooxml";
 import { expectedMonthSheetName, readLengths, readPautRows, writePautLines, type PautLine, type SheetOwnership } from "./statementBook";
@@ -117,6 +117,24 @@ export function inspectorsOnDate(date: string): { insp1: string; insp2: string }
   if (!work.ilji) return null;
   if (!staffCache || staffCache.files !== work.ilji) staffCache = { files: work.ilji, map: readDayStaff(work.ilji) };
   return staffCache.map[date] ?? null;
+}
+
+let workLogCache: { files: ZipFiles; map: Record<string, WorkLogDay> } | null = null;
+
+/**
+ * 기기에 있는 작업일지(동기화가 쓰고 받는 그 사본)에서 날짜별 근무자·근무시간. 네트워크를 부르지 않고 쓰지도 않는다.
+ * 작업일지가 아직 없으면 빈 객체.
+ */
+export function workLogByDate(): Record<string, WorkLogDay> {
+  if (!work.ilji) return {};
+  if (!workLogCache || workLogCache.files !== work.ilji) {
+    try {
+      workLogCache = { files: work.ilji, map: readWorkLog(work.ilji) };
+    } catch {
+      workLogCache = { files: work.ilji, map: {} };
+    }
+  }
+  return workLogCache.map;
 }
 
 export function sheetNameFor(records: InspectionRecord[], site: string): string | null {

@@ -529,3 +529,28 @@ button.mini strong { color: var(--text); font-size: 15px; font-weight: 800; }
 .th-filter { display: inline-flex; align-items: center; gap: 3px; font: inherit; font-weight: 800; color: inherit; background: none; border: 0; padding: 0; min-height: 24px; white-space: nowrap; }
 .th-filter span { color: var(--muted); font-size: 10px; }
 .live-table thead th.filtered .th-filter span { color: var(--accent); }
+
+/* 1번 탭: 날짜별 기록(검사 기록 아래에 더함) */
+.day-history { background: #fff; border-radius: 16px; padding: 0 12px 10px; box-shadow: var(--shadow); margin-top: 12px; }
+.day-history-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 10px 0 6px; }
+.day-history-head span { font-size: 12px; font-weight: 800; color: var(--muted); }
+.day-history-head strong { font-size: 13px; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.day-entry { border-top: 1px solid var(--border); }
+.day-entry summary { display: grid; grid-template-columns: auto auto 1fr; gap: 8px; align-items: center; min-height: 40px; cursor: pointer; font-size: 13px; list-style: none; }
+.day-entry summary::-webkit-details-marker { display: none; }
+.day-entry summary .cnt { font-weight: 800; color: var(--text); }
+.day-entry summary .cnt em { font-style: normal; color: #d70015; }
+.day-entry summary .who { color: var(--muted); font-size: 12px; font-weight: 700; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.day-entry[open] summary { color: var(--accent); }
+.day-work { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); font-weight: 700; padding: 2px 0 6px; }
+.day-work b { color: var(--text); }
+.day-work .none, .day-none { color: #b45309; font-size: 12px; font-weight: 700; }
+.day-none { padding: 0 0 8px; }
+.day-lines { padding-bottom: 8px; }
+.day-line { display: grid; grid-template-columns: 1fr 36px minmax(70px, auto); gap: 6px; font-size: 12px; font-weight: 700; padding: 4px 0; border-top: 1px dashed var(--border); }
+.day-line.head { color: var(--muted); font-size: 11px; border-top: 0; }
+.day-line.fail { background: #fff6f6; }
+.day-line .dwg { word-break: break-all; }
+.day-line i { font-style: normal; }
+.day-line .ok { color: #178a3a; }
+.day-line .bad { color: #d70015; }

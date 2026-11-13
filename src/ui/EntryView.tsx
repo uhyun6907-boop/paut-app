@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { buildBill, recordsForMonth } from "../domain/billing";
+import { DayHistory } from "./DayHistory";
 import { defectStats, latestLine, lineSummary, linesByLatestDate, shortDate, sortLineRows } from "../domain/history";
 import {
   canonicalPoint,
@@ -474,6 +475,9 @@ export function EntryView() {
           </div>
         </>
       )}
+
+      {/* 날짜별 기록: 위 '검사 기록'(라인별)은 그대로 두고 그 아래에 더한다. 읽기만 한다. */}
+      {site && <DayHistory records={siteRecords} site={site} />}
 
       <div className="bottom-dock">
         <button
