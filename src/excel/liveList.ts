@@ -18,6 +18,10 @@ import { columnIndex, columnLetter } from "./ooxml";
 export const LIVE_LAST_COL = 25;
 /** 한 번에 읽는 행 수(A–Y 25열 × 500행). */
 export const LIVE_CHUNK_ROWS = 500;
+/** 동시에 읽는 묶음 수(Graph 제한·429 를 피하려고 작게). 429 는 GraphClient 가 Retry-After 만큼 기다렸다 다시 보낸다. */
+export const LIVE_PARALLEL = 3;
+/** 실제 기록 끝 행을 찾을 때 보는 열(날짜·라인·포인트 — 사람이 적는 칸, 수식 없음). */
+export const LIVE_PROBE_COLS = "E:G";
 /** 이보다 아래 행은 읽지 않는다(값이 있는 끝 행이 비정상적으로 클 때 아이폰 보호). */
 export const LIVE_MAX_ROW = 20000;
 /** 데이터는 6행부터(4행이 머리글). */
@@ -133,6 +137,9 @@ export async function loadLiveList(client: GraphClient, config: AppConfig, site:
   if (!file?.id) return { ok: false, message: `${label} 파일을 아직 고르지 않았습니다. 설정 → OneDrive 통합 문서에서 고르세요.` };
   let itemId = file.id;
   let meta: { id: string; name: string; eTag?: string };
+  // 파일 정보와 시트 목록은 동시에 묻는다(왕복 한 번 절약). 파일이 옮겨졌으면(404) 이름으로 찾아 다시 묻는다.
+  let sheetsP = client.worksheetsOf(itemId);
+  sheetsP.catch(() => undefined);
   try {
     meta = await client.itemMeta(itemId);
   } catch (error) {
@@ -141,25 +148,27 @@ export async function loadLiveList(client: GraphClient, config: AppConfig, site:
     if (!found) return { ok: false, message: `OneDrive 에서 ${label} 파일(${file.name || itemId})을 찾지 못했습니다.` };
     itemId = found.id;
     meta = await client.itemMeta(itemId);
+    sheetsP = client.worksheetsOf(itemId);
   }
-  const sheets = await client.worksheetsOf(itemId);
+  const sheets = await sheetsP;
   const sheet = sheets.find((s) => s.name === sheetName) ?? sheets.find((s) => s.name.trim() === sheetName.trim());
   if (!sheet) return { ok: false, message: `${meta.name || label} 에 '${sheetName}' 시트가 없습니다. 시트는 앱이 만들지 않습니다(PC 엑셀에서 만들어 주세요).` };
-  // 서식만 있는 빈 행(실제 시트는 65536행까지)은 읽지 않는다: 값이 있는 범위만 확인한 뒤 A–Y 를 나눠 읽는다.
-  const extent = parseBox(await client.valuesExtent(itemId, sheet.id));
-  const lastRow = extent ? Math.min(extent.r2, LIVE_MAX_ROW) : 0;
+  // 서식만 있는 빈 행(실제 시트는 65536행까지)·미리 채운 순번(A)만 있는 행은 읽지 않는다:
+  // 실제 기록이 끝나는 행(날짜·라인·포인트 E–G 의 마지막 값)까지만 A–Y 를 나눠, 몇 개씩 동시에 읽는다.
+  const lastRow = await lastDataRow(client, itemId, sheet.id);
   const header: LiveTable["header"] = [];
   const rows: LiveRow[] = [];
   const values: GraphCell[][] = [];
   const formulas: GraphCell[][] = [];
-  for (let r1 = 1; r1 <= lastRow; r1 += LIVE_CHUNK_ROWS) {
-    const r2 = Math.min(lastRow, r1 + LIVE_CHUNK_ROWS - 1);
+  const chunks: { r1: number; r2: number }[] = [];
+  for (let r1 = 1; r1 <= lastRow; r1 += LIVE_CHUNK_ROWS) chunks.push({ r1, r2: Math.min(lastRow, r1 + LIVE_CHUNK_ROWS - 1) });
+  await mapLimit(chunks, LIVE_PARALLEL, async ({ r1, r2 }) => {
     const part = await client.readRangeCells(itemId, sheet.id, `A${r1}:${columnLetter(LIVE_LAST_COL)}${r2}`);
     for (let i = 0; i <= r2 - r1; i++) {
-      values.push(part.values[i] ?? []);
-      formulas.push(part.formulas[i] ?? []);
+      values[r1 - 1 + i] = part.values[i] ?? [];
+      formulas[r1 - 1 + i] = part.formulas[i] ?? [];
     }
-  }
+  });
   const at = (grid: GraphCell[][], r: number, c: number): GraphCell => grid[r - 1]?.[c - 1] ?? "";
   for (let c = 1; c <= LIVE_LAST_COL; c++) {
     const col = columnLetter(c);
@@ -179,6 +188,46 @@ export async function loadLiveList(client: GraphClient, config: AppConfig, site:
     if (any) rows.push({ row: r, cells });
   }
   return { ok: true, table: { book, itemId, fileName: meta.name, sheetId: sheet.id, sheetName: sheet.name, eTag: meta.eTag, header, rows: sortBySeq(rows) } };
+}
+
+/**
+ * 실제 기록이 끝나는 행. E–G(날짜·라인·포인트)에 값이 있는 마지막 행을 먼저 묻고,
+ * 그 요청이 안 되면(로그인 오류 제외) 예전처럼 시트 전체의 값 범위(usedRange(valuesOnly))로 정한다.
+ * 머리글(4–5행)은 언제나 읽는다.
+ */
+export async function lastDataRow(client: GraphClient, itemId: string, sheetId: string): Promise<number> {
+  const [a, b] = LIVE_PROBE_COLS.split(":");
+  let last: number | null = null;
+  try {
+    const box = parseBox(await client.rangeValuesExtent(itemId, sheetId, `${a}1:${b}${LIVE_MAX_ROW}`));
+    if (box) last = box.r2;
+  } catch (error) {
+    // 로그인·연결 끊김·시간 초과는 그대로 알린다. 그 밖의 Graph 오류(지원 안 함·잠김 등)면 예전 방식으로.
+    if (!(error instanceof GraphError) || error.status === 0 || error.status === 401 || error.status === 403) throw error;
+  }
+  if (last === null) {
+    const extent = parseBox(await client.valuesExtent(itemId, sheetId));
+    last = extent ? extent.r2 : 0;
+  }
+  return Math.min(Math.max(last, LIVE_FIRST_DATA_ROW - 1), LIVE_MAX_ROW);
+}
+
+/** 작업을 최대 limit 개씩 동시에. 하나라도 실패하면 그 오류로 끝낸다. */
+async function mapLimit<T>(items: T[], limit: number, run: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    while (!failed && next < items.length) {
+      const item = items[next++];
+      try {
+        await run(item);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 }
 
 export class LiveConflictError extends Error {

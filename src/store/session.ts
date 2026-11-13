@@ -28,6 +28,7 @@ import {
   type GraphSyncOutcome,
   type StatementOwnership,
 } from "../excel/engine";
+import { backendEnabled } from "../sync/backend";
 import { accessToken, completeRedirect, currentAccount, LOGIN_NEEDED_TEXT, loginRedirect, logoutRedirect, resolveClientId } from "../sync/msal";
 import { downloadItem, GRAPH_LOGIN_TEXT, GRAPH_TIMEOUT_TEXT, GraphClient } from "../sync/graph";
 import { getAuthState, isLoginError, isLoginFailureText as authLoginText, onAuthChange, type AuthState } from "../sync/authState";
@@ -2126,7 +2127,8 @@ export { PASS, FAIL, statementSkipReason };
 export function liveListClient(): { client: GraphClient | null; reason: string } {
   if (state.config.syncMode !== "graph") return { client: null, reason: "OneDrive 모드가 아닙니다. 설정 → Microsoft 연결에서 OneDrive 를 고르고 로그인하세요." };
   const clientId = resolveClientId(state.config.clientId);
-  if (!clientId) return { client: null, reason: "Azure 앱 클라이언트 ID가 없습니다. 설정 → Microsoft 연결에서 입력하세요." };
+  // 로그인 중계 서버(paut-api) 모드: 토큰은 서버에서 받으므로 클라이언트 ID 가 없어도 읽는다(accessToken 이 서버 경로로 간다).
+  if (!clientId && !backendEnabled()) return { client: null, reason: "Azure 앱 클라이언트 ID가 없습니다. 설정 → Microsoft 연결에서 입력하세요." };
   // loginNeeded·account 만 보고 막지 않는다: 동기화가 401·시간 초과로 '로그인 필요'를 켜 둔 채여도
   // 조용한 토큰이 되면 읽는다. 정말 로그인이 필요하면 토큰이 LoginRequiredError 를 던져 화면에 안내한다.
   return { client: new GraphClient({ getToken: (force) => accessToken(clientId, { forceRefresh: force, interactive: false }) }), reason: "" };

@@ -227,6 +227,24 @@ export class FakeDrive {
       const q = sheet.name.includes(" ") || /[^A-Za-z0-9_]/.test(sheet.name) ? `'${sheet.name}'` : sheet.name;
       return json({ address: `${q}!${columnLetter(c1)}${r1}:${columnLetter(c2)}${r2}`, values, formulas });
     }
+    // 범위 안의 값 범위(range(...)/usedRange(valuesOnly=true)): 값 또는 수식이 있는 칸만 본다(시트 usedRange 와 같은 규칙).
+    const rangeUsed = /^\/workbook\/worksheets\/([^/]+)\/range\(address='([^']+)'\)\/usedRange\(valuesOnly=true\)(\?.*)?$/.exec(rest);
+    if (rangeUsed && method === "GET") {
+      const sheet = workbookSheets(item.files).find((s) => sheetId(s.path) === rangeUsed[1]);
+      if (!sheet) return err(404, "ItemNotFound");
+      const box = parseAddress(rangeUsed[2]);
+      let r1 = Infinity, c1 = Infinity, r2 = 0, c2 = 0;
+      for (const c of this.cells(item.files, sheet.path).values()) {
+        if (c.v == null && !c.f) continue;
+        const ci = columnIndex(c.col);
+        if (c.row < box.r1 || c.row > box.r2 || ci < box.c1 || ci > box.c2) continue;
+        r1 = Math.min(r1, c.row); r2 = Math.max(r2, c.row); c1 = Math.min(c1, ci); c2 = Math.max(c2, ci);
+      }
+      const q = sheet.name.includes(" ") || /[^A-Za-z0-9_]/.test(sheet.name) ? `'${sheet.name}'` : sheet.name;
+      // 실제 Graph: 빈 범위면 왼쪽 위 칸 하나를 돌려준다.
+      if (!r2) return json({ address: `${q}!${columnLetter(box.c1)}${box.r1}` });
+      return json({ address: `${q}!${columnLetter(c1)}${r1}:${columnLetter(c2)}${r2}` });
+    }
     const range = /^\/workbook\/worksheets\/([^/]+)\/range\(address='([^']+)'\)(\/insert)?(\?.*)?$/.exec(rest);
     if (range) {
       const sheet = workbookSheets(item.files).find((s) => sheetId(s.path) === range[1]);

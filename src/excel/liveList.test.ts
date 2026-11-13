@@ -271,7 +271,14 @@ describe("리스트 탭 · 실제 크기 시트(서식 65536행)와 실패 안�
     if (!res.ok) return;
     const table = res.table;
     expect(table.sheetName.trim()).toBe(SITE);
-    expect(table.rows.length).toBeGreaterThan(1000);
+    // 실제 기록(E–G 날짜·라인·포인트)이 끝나는 행까지만 읽는다. A열 순번만 미리 채워 둔 아래쪽 빈 행(…1298)은 읽지 않는다.
+    expect(table.rows.length).toBeGreaterThan(400);
+    const siteRecs = recs.filter((r) => r.sheetName.trim() === SITE && r.excelRow);
+    expect(siteRecs.length).toBeGreaterThan(400);
+    for (const r of siteRecs) expect(table.rows.some((row) => row.row === r.excelRow)).toBe(true);
+    const last = Math.max(...table.rows.map((r) => r.row));
+    expect(last).toBe(Math.max(...siteRecs.map((r) => r.excelRow!)));
+    expect(drive.log.some((e) => /A\d+:Y1[0-9]{3}'/.test(e.path))).toBe(false); // 1000행 아래 묶음은 묻지 않음
     const app = recs.find((r) => r.src === "user" && r.site === SITE)!;
     expect(table.rows.some((r) => r.row === app.excelRow)).toBe(true);
     const seqs = table.rows.map((r) => r.cells[0].value).filter((v) => typeof v === "number") as number[];

@@ -483,6 +483,15 @@ export class GraphClient {
     return json.address ?? "";
   }
 
+  /**
+   * 주어진 범위 안에서 값이 있는 칸의 범위 주소만(값은 받지 않음). 예: E1:G20000 → 'Sheet'!E4:G439.
+   * 시트 전체 usedRange 와 달리 미리 채워 둔 순번(A)·비고 열 등은 보지 않아 실제 기록이 끝나는 행을 싸게 알 수 있다.
+   */
+  async rangeValuesExtent(itemId: string, sheetId: string, address: string): Promise<string> {
+    const json = await this.json<{ address?: string }>(worksheetRangeUrl(itemId, sheetId, address) + "/usedRange(valuesOnly=true)?$select=address");
+    return json.address ?? "";
+  }
+
   /** 범위의 값·수식(세션 없이 읽기). */
   async readRangeCells(itemId: string, sheetId: string, address: string): Promise<{ values: GraphCell[][]; formulas: GraphCell[][] }> {
     const json = await this.json<{ values?: GraphCell[][]; formulas?: GraphCell[][] }>(worksheetRangeUrl(itemId, sheetId, address) + "?$select=values,formulas");

@@ -24,6 +24,7 @@ html, body, #root, button, a, summary, label {
   user-select: none;
   -webkit-touch-callout: none;
   -webkit-user-drag: none;
+  /* manipulation = 스크롤 + 두 손가락 확대/축소 허용, 두 번 탭 확대만 끔(탭이 바로 눌리게). */
   touch-action: manipulation;
 }
 input, textarea, select, [contenteditable="true"] {
@@ -335,7 +336,7 @@ details.meta-row .day-compact { box-shadow: none; padding: 0 8px 8px; background
 .mini.wide { grid-column: 1 / -1; align-items: center; justify-content: center; color: var(--text); font-size: 15px; }
 button.mini { background: var(--surface2); border-radius: 12px; padding: 6px 8px; min-height: 48px; }
 button.mini strong { color: var(--text); font-size: 15px; font-weight: 800; }
-.day-compact .field-input, .day-compact .site-select { min-height: 36px; padding: 4px 8px; font-size: 14px; font-weight: 700; border-width: 1px; }
+.day-compact .field-input, .day-compact .site-select { min-height: 36px; padding: 4px 8px; font-size: 16px; /* 16px 미만이면 확대가 허용된 iOS 는 입력칸을 누를 때 저절로 확대한다 */ font-weight: 700; border-width: 1px; }
 .time-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 10px 0; max-height: 46vh; overflow: auto; }
 .time-grid button { min-height: 44px; border-radius: 12px; background: var(--surface2); border: 1px solid var(--border); font-weight: 800; }
 .time-grid button.on { background: #e8f1ff; border-color: var(--accent); color: var(--accent); }
@@ -357,15 +358,15 @@ button.mini strong { color: var(--text); font-size: 15px; font-weight: 800; }
 .line-now strong { display: block; font-size: 22px; letter-spacing: -0.03em; }
 .line-now button { color: var(--muted); font-weight: 800; text-align: left; min-height: 32px; }
 .tool-row { display: flex; flex-direction: column; gap: 8px; }
-/* 칠하기(가로 드래그 합격): 세로 스크롤은 브라우저가, 가로 움직임은 앱이 받는다. 카드 사이 빈틈에서도 글자 선택·복사 메뉴가 뜨지 않게. */
+/* 칠하기(가로 드래그 합격): 세로 스크롤·두 손가락 확대는 브라우저가, 한 손가락 가로 움직임은 앱이 받는다. 카드 사이 빈틈에서도 글자 선택·복사 메뉴가 뜨지 않게. */
 .point-grid {
-  display: flex; flex-wrap: wrap; gap: 6px; touch-action: pan-y;
+  display: flex; flex-wrap: wrap; gap: 6px; touch-action: pan-y pinch-zoom;
   -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
 }
 .pcard {
   position: relative; width: auto; min-width: 40px; min-height: 48px; border-radius: 10px; background: #fff;
   border: 1px solid var(--border); display: flex; flex-direction: column;
-  align-items: center; justify-content: center; gap: 1px; touch-action: pan-y;
+  align-items: center; justify-content: center; gap: 1px; touch-action: pan-y pinch-zoom;
   padding: 2px 4px 3px;
   -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-user-drag: none;
 }
@@ -502,3 +503,29 @@ button.mini strong { color: var(--text); font-size: 15px; font-weight: 800; }
 .live-table td.ro { color: var(--muted); cursor: default; background: #fafafa; }
 .live-table td.on { outline: 2px solid var(--accent); outline-offset: -2px; }
 .live-edit { position: sticky; top: 0; z-index: 20; }
+
+/* 리스트 탭: 업데이트 표시·열 필터 */
+.list-refresh { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 6px 12px 0; font-size: 12px; font-weight: 700; color: var(--muted); }
+.list-refresh small { flex-basis: 100%; font-weight: 600; }
+.list-refresh.stale { color: #b45309; }
+.list-refresh .spin { width: 10px; height: 10px; border-radius: 50%; border: 2px solid #c7c7cc; border-top-color: var(--accent); animation: list-spin .8s linear infinite; }
+@keyframes list-spin { to { transform: rotate(360deg); } }
+.filter-bar { margin: 8px 12px 0; display: flex; flex-direction: column; gap: 6px; }
+.filter-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.filter-count { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; font-weight: 800; color: var(--accent); }
+.filter-hint { font-size: 12px; color: var(--muted); font-weight: 600; }
+.chip { min-height: 32px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); background: #fff; font-size: 13px; font-weight: 700; color: var(--text); }
+.chip.on { border-color: var(--accent); color: var(--accent); background: #e8f1ff; }
+.chip.clear { color: #d70015; border-color: #ffc9cf; }
+.filter-panel { margin: 8px 12px 0; }
+.filter-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.filter-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.filter-values { max-height: 40vh; overflow: auto; -webkit-overflow-scrolling: touch; border-top: 1px solid var(--border); }
+.filter-value { display: flex; align-items: center; gap: 10px; min-height: 40px; border-bottom: 1px solid var(--border); font-size: 14px; }
+.filter-value input { width: 20px; height: 20px; flex: none; }
+.filter-value .v { flex: 1; min-width: 0; word-break: break-all; }
+.filter-value .n { color: var(--muted); font-size: 12px; font-weight: 700; }
+.live-table thead th.filtered { background: #e8f1ff; }
+.th-filter { display: inline-flex; align-items: center; gap: 3px; font: inherit; font-weight: 800; color: inherit; background: none; border: 0; padding: 0; min-height: 24px; white-space: nowrap; }
+.th-filter span { color: var(--muted); font-size: 10px; }
+.live-table thead th.filtered .th-filter span { color: var(--accent); }
