@@ -323,6 +323,20 @@ export class GraphClient {
     }
   }
 
+  /** 지금 토큰으로 /me 가 되는가(새 토큰으로도 401 일 때, 로그인 만료인지 파일 요청 거부인지 가른다). */
+  private async tokenWorks(timeoutMs: number): Promise<boolean> {
+    try {
+      const res = await this.timedFetch(
+        `${GRAPH}/me?$select=id`,
+        { method: "GET", headers: { Authorization: `Bearer ${this.token}` } },
+        Math.min(timeoutMs, 15_000),
+      );
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
   async request(url: string, init: RequestInit = {}, options: RequestOptions = {}): Promise<Response> {
     if (this.authFailed && getAuthState() === "expired") throw new GraphError(401, GRAPH_LOGIN_TEXT, "expired");
     if (!this.token || this.forceNext) await this.refreshToken(false);
@@ -364,6 +378,12 @@ export class GraphClient {
         await this.refreshToken(true);
         attempt -= 1; // 토큰 갱신은 재시도 횟수에 넣지 않는다.
         continue;
+      }
+      if (res.status === 401 && (await this.tokenWorks(timeoutMs))) {
+        // 같은 토큰으로 /me 는 된다 = 로그인은 살아 있다. 이 파일(항목) 요청만 거부된 것이므로
+        // '로그인 필요'로 바꾸지 않고 그 파일의 실패로 보여 준다(로그인 → 다시 로그인 화면 반복 방지).
+        console.warn("Graph 401 이지만 /me 는 정상 → 파일 요청 거부로 처리", url, lastDetail);
+        throw new GraphError(403, `OneDrive가 이 파일 요청을 거부했습니다(401, 로그인은 정상). ${lastDetail}`.trim(), lastDetail);
       }
       if (res.status === 401) {
         this.authFailed = true;
