@@ -15,6 +15,7 @@ import {
   markExpired,
   markSignedOut,
 } from "./authState";
+import { backendEmail, backendEnabled, backendLogin, backendLogout, backendToken, completeBackendRedirect } from "./backend";
 
 // 전역 인증 상태 API 는 authState.ts 에 있고 여기서 그대로 다시 내보낸다(기존 import 경로 유지).
 export {
@@ -181,6 +182,10 @@ export interface RedirectOutcome {
  * 한 페이지 로드에서 한 번만 실행되고, 토큰 요청(accessToken)은 이것이 끝난 뒤에만 한다.
  */
 export async function completeRedirect(clientId: string): Promise<RedirectOutcome> {
+  if (backendEnabled()) {
+    const out = completeBackendRedirect();
+    return { account: out.email !== null ? backendAccount(out.email) : null, fromRedirect: out.fromRedirect, error: out.error };
+  }
   if (!clientId) return { account: null, fromRedirect: false };
   const app = await msalApp(clientId);
   return handleRedirectOnce(app);
@@ -235,6 +240,10 @@ export interface LoginOptions {
  * Microsoft 세션 쿠키('로그인 상태 유지')가 살아 있으면 비밀번호 없이 곧바로 돌아온다.
  */
 export async function loginRedirect(clientId: string, options: LoginOptions = {}): Promise<void> {
+  if (backendEnabled()) {
+    backendLogin(options.switchAccount ? null : backendEmail());
+    return;
+  }
   const app = await msalApp(clientId);
   await handleRedirectOnce(app);
   const uri = redirectUri();
@@ -267,6 +276,10 @@ export function clearStaleInteraction(): void {
 }
 
 export async function logoutRedirect(clientId: string): Promise<void> {
+  if (backendEnabled()) {
+    await backendLogout();
+    return;
+  }
   const app = await msalApp(clientId);
   const account = restoreAccount(app) ?? undefined;
   try {
@@ -317,6 +330,7 @@ export function needsInteraction(error: unknown): boolean {
  */
 export async function accessToken(clientId: string, options: TokenOptions = {}): Promise<string> {
   const interactive = options.interactive ?? true;
+  if (backendEnabled()) return backendAccessToken(options, interactive);
   const app = await msalApp(clientId);
   // 돌아온 응답 처리가 멈춰도(네트워크) 캐시된 계정으로 이어 간다.
   await withTimeout(handleRedirectOnce(app), authTimeouts.redirectMs, TOKEN_TIMEOUT_TEXT).catch((error) => {
@@ -395,7 +409,25 @@ export function initAuth(clientId: string): Promise<void> {
   return initPromise;
 }
 
+/** 중계 서버 모드의 토큰. 다시 로그인이 필요하면 interactive 일 때만 서버 로그인으로 넘어간다. */
+async function backendAccessToken(options: TokenOptions, interactive: boolean): Promise<string> {
+  if (getAuthState() === "expired" && !options.allowWhenExpired && !interactive) throw new AuthExpiredError();
+  try {
+    return await withTimeout(backendToken(!!options.forceRefresh), authTimeouts.silentMs, TOKEN_TIMEOUT_TEXT);
+  } catch (error) {
+    if (!interactive || !(error instanceof LoginRequiredError)) throw error;
+    backendLogin(backendEmail());
+    throw new Error("로그인을 다시 진행합니다.");
+  }
+}
+
+/** 화면이 쓰는 건 username 뿐이다. */
+function backendAccount(email: string): AccountInfo {
+  return { username: email, homeAccountId: "paut-api", environment: "paut-api", tenantId: "", localAccountId: "" } as AccountInfo;
+}
+
 export function currentAccount(clientId: string): string | null {
+  if (backendEnabled()) return backendEmail();
   if (!pca || boundClientId !== clientId) return null;
   return restoreAccount(pca)?.username ?? null;
 }

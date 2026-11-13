@@ -1,0 +1,14 @@
+name = "paut-api"
+main = "src/index.js"
+compatibility_date = "2025-10-01"
+workers_dev = true
+
+[vars]
+AZURE_CLIENT_ID = "52353295-20fe-41c8-873a-a4dae9c92042"
+APP_URL = "https://uhyun6907-boop.github.io/paut-app/"
+APP_ORIGIN = "https://uhyun6907-boop.github.io"
+
+# id 는 배포 워크플로가 채운다(없으면 paut-api-store 이름으로 만든다).
+[[kv_namespaces]]
+binding = "STORE"
+id = "__KV_ID__"

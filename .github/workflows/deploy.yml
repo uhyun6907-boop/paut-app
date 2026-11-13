@@ -29,6 +29,9 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build:pages
+        env:
+          # 저장소 Variables 의 PAUT_API_URL(예: https://paut-api.xxx.workers.dev). 비어 있으면 기존 MSAL 로그인.
+          VITE_PAUT_API: ${{ vars.PAUT_API_URL }}
 
       - name: Pages 부가 파일
         run: |

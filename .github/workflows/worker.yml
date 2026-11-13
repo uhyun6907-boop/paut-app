@@ -1,0 +1,53 @@
+# worker/ 가 바뀌면 Cloudflare 에 로그인 중계 서버(paut-api)를 배포한다.
+# 필요한 저장소 Secrets: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, AZURE_CLIENT_SECRET
+name: deploy-worker
+
+on:
+  push:
+    branches: [source]
+    paths: ["worker/**", ".github/workflows/worker.yml"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Secrets 확인
+        id: check
+        run: |
+          missing=""
+          [ -n "$CLOUDFLARE_API_TOKEN" ] || missing="$missing CLOUDFLARE_API_TOKEN"
+          [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || missing="$missing CLOUDFLARE_ACCOUNT_ID"
+          [ -n "$AZURE_CLIENT_SECRET" ] || missing="$missing AZURE_CLIENT_SECRET"
+          if [ -n "$missing" ]; then echo "::warning::저장소 Secrets 가 없어 서버 배포를 건너뜁니다:$missing"; echo "ready=false" >> "$GITHUB_OUTPUT"; else echo "ready=true" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/setup-node@v4
+        if: steps.check.outputs.ready == 'true'
+        with:
+          node-version: 22
+
+      - name: KV 준비
+        if: steps.check.outputs.ready == 'true'
+        run: |
+          find_id() { npx -y wrangler@4 kv namespace list | jq -r '[.[] | select(.title | endswith("paut-api-store"))][0].id // empty'; }
+          ID=$(find_id)
+          if [ -z "$ID" ]; then npx -y wrangler@4 kv namespace create paut-api-store; ID=$(find_id); fi
+          [ -n "$ID" ] || { echo "::error::KV 를 만들지 못했습니다"; exit 1; }
+          sed -i "s/__KV_ID__/$ID/" wrangler.toml
+
+      - name: 배포
+        if: steps.check.outputs.ready == 'true'
+        run: npx -y wrangler@4 deploy
+
+      - name: client secret 넣기
+        if: steps.check.outputs.ready == 'true'
+        run: printf '%s' "$AZURE_CLIENT_SECRET" | npx -y wrangler@4 secret put AZURE_CLIENT_SECRET
