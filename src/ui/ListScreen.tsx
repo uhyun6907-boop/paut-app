@@ -5,7 +5,17 @@ import { cellText, isEditable, liveTarget, loadLiveList, matchRecord, recordPatc
 import { listFileOf } from "../excel/engine";
 import { CACHE_STALE_TEXT, REFRESHING_TEXT, openList, saveListCache, savedAtText, type CacheSlot, type ListView } from "./listLoad";
 import { FilterPanel, FilterBar } from "./ListFilterPanel";
-import { activeColumns, applyFilters, type ListFilters } from "./listFilter";
+import { applyFilters, type ListFilters } from "./listFilter";
+import { CARD_PAGE, MODE_LABEL, pageRows, visibleColumns, type ColumnMode } from "./listLayout";
+
+const MODE_KEY = "paut-list-columns";
+function readMode(): ColumnMode {
+  try {
+    return localStorage.getItem(MODE_KEY) === "all" ? "all" : "key";
+  } catch {
+    return "key";
+  }
+}
 import { applyListCellEdit, getState, graphReadOk, liveListClient, signIn, useSession } from "../store/session";
 import { GRAPH_TIMEOUT_TEXT, GraphError, type GraphClient } from "../sync/graph";
 import { isLoginError, isLoginFailureText } from "../sync/authState";
@@ -56,22 +66,56 @@ export async function readLiveList(
   }
 }
 
-/** 표의 한 행. 바뀌지 않은 행은 다시 그리지 않는다(뒤에서 새로 읽어도 깜빡이지 않게). */
-const LiveRowView = memo(function LiveRowView(props: { row: LiveRow; editing: string | null; onCell: (cell: LiveCell) => void }) {
-  const { row, editing, onCell } = props;
+/**
+ * 행 카드 한 장(휴대폰용, 가로 스크롤 없음). 위: 순번·날짜·판정 / 가운데: 라인·포인트 크게 / 아래: 비고와(모든 열이면) 나머지 열.
+ * 칸을 누르면 그 칸만 고친다. 바뀌지 않은 행은 다시 그리지 않는다(뒤에서 새로 읽어도 깜빡이지 않게).
+ */
+const LiveRowCard = memo(function LiveRowCard(props: {
+  row: LiveRow;
+  cols: { col: string; title: string }[];
+  editing: string | null;
+  onCell: (cell: LiveCell) => void;
+}) {
+  const { row, cols, editing, onCell } = props;
+  const cellOf = (col: string) => row.cells.find((c) => c.col === col);
+  const seq = cellOf("A");
+  const result = cellOf("P");
+  const resultText = result ? cellText(result).trim() : "";
+  const verdict = /불|FAIL|REJ/i.test(resultText) ? "bad" : resultText ? "ok" : "";
+  const field = (col: string, title: string, cls = "") => {
+    const cell = cellOf(col);
+    if (!cell) return null;
+    const editable = isEditable(cell);
+    const text = cellText(cell);
+    return (
+      <button
+        key={col}
+        type="button"
+        className={`lc-f ${cls}${editable ? "" : " ro"}${editing === cell.address ? " on" : ""}`}
+        aria-label={`${title} ${cell.address}`}
+        onClick={() => editable && onCell(cell)}
+      >
+        <span className="lc-k">{title}</span>
+        <span className="lc-v">{text || "\u00a0"}</span>
+      </button>
+    );
+  };
+  const title = (col: string) => cols.find((c) => c.col === col)?.title ?? col;
+  const has = (col: string) => cols.some((c) => c.col === col);
+  const main = new Set(["E", "F", "G", "P"]);
   return (
-    <tr>
-      <th>{row.row}</th>
-      {row.cells.map((cell) => {
-        const editable = isEditable(cell);
-        const on = editing === cell.address;
-        return (
-          <td key={cell.address} className={`${editable ? "" : "ro"}${on ? " on" : ""}`} onClick={() => editable && onCell(cell)}>
-            {cellText(cell)}
-          </td>
-        );
-      })}
-    </tr>
+    <div className={`lc${verdict === "bad" ? " fail" : ""}`}>
+      <div className="lc-top">
+        <span className="lc-seq">{seq && cellText(seq) ? `#${cellText(seq)}` : ""}<small> {row.row}행</small></span>
+        {has("E") && field("E", title("E"), "date")}
+        {has("P") && field("P", title("P"), `verdict ${verdict}`)}
+      </div>
+      <div className="lc-main">
+        {has("F") && field("F", title("F"), "line")}
+        {has("G") && field("G", title("G"), "point")}
+      </div>
+      <div className="lc-rest">{cols.filter((c) => !main.has(c.col)).map((c) => field(c.col, c.title))}</div>
+    </div>
   );
 });
 
@@ -90,6 +134,12 @@ export function ListScreen() {
   const [note, setNote] = useState("");
   const [filters, setFilters] = useState<ListFilters>({});
   const [filterCol, setFilterCol] = useState<string | null>(null);
+  const [mode, setMode] = useState<ColumnMode>(readMode);
+  const [limit, setLimit] = useState(CARD_PAGE);
+  function chooseMode(next: ColumnMode): void {
+    setMode(next);
+    try { localStorage.setItem(MODE_KEY, next); } catch { /* 저장 불가 */ }
+  }
   const loadNo = useRef(0);
   const clientRef = useRef<GraphClient | null>(null);
   const viewRef = useRef(view);
@@ -130,6 +180,7 @@ export function ListScreen() {
     const siteChanged = lastSite.current !== site;
     lastSite.current = site;
     if (siteChanged) {
+      setLimit(CARD_PAGE);
       setFilters({});
       setFilterCol(null);
     }
@@ -213,7 +264,9 @@ export function ListScreen() {
 
   const table = view.status === "ok" ? view.table : null;
   const shownRows = useMemo(() => (table ? applyFilters(table.rows, filters) : []), [table, filters]);
-  const activeCols = activeColumns(filters);
+  // 필터가 바뀌면 카드는 처음부터(앞 200장).
+  useEffect(() => setLimit(CARD_PAGE), [filters]);
+  const cols = useMemo(() => (table ? visibleColumns(table.header, mode) : []), [table, mode]);
   const loginStale = view.status === "ok" && view.staleError === LIST_LOGIN_TEXT;
 
   return (
@@ -289,6 +342,13 @@ export function ListScreen() {
           <div className="empty-note">「{table.sheetName}」 시트에 행이 없습니다.</div>
         ) : (
           <>
+            <div className="lc-mode" role="group" aria-label="보이는 열">
+              {(["key", "all"] as const).map((m) => (
+                <button key={m} type="button" className={`chip${mode === m ? " on" : ""}`} aria-pressed={mode === m} onClick={() => chooseMode(m)}>
+                  {MODE_LABEL[m]}
+                </button>
+              ))}
+            </div>
             <FilterBar
               header={table.header}
               filters={filters}
@@ -313,33 +373,25 @@ export function ListScreen() {
             {shownRows.length === 0 ? (
               <div className="empty-note">필터에 맞는 행이 없습니다.</div>
             ) : (
-              <div className="live-wrap">
-                <table className="live-table">
-                  <thead>
-                    <tr>
-                      <th>행</th>
-                      {table.header.map((h) => (
-                        <th key={h.col} title={h.col} className={activeCols.includes(h.col) ? "filtered" : ""}>
-                          <button type="button" className="th-filter" aria-label={`${h.title || h.col} 필터`} onClick={() => setFilterCol(filterCol === h.col ? null : h.col)}>
-                            {h.title || h.col}
-                            <span aria-hidden="true">{activeCols.includes(h.col) ? "▼" : "▾"}</span>
-                          </button>
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {shownRows.map((row) => (
-                      <LiveRowView
-                        key={row.row}
-                        row={row}
-                        editing={edit && edit.cell.row === row.row ? edit.cell.address : null}
-                        onCell={onCell}
-                      />
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <>
+                <div className="lc-list">
+                  {pageRows(shownRows, limit).map((row) => (
+                    <LiveRowCard
+                      key={row.row}
+                      row={row}
+                      cols={cols}
+                      editing={edit && edit.cell.row === row.row ? edit.cell.address : null}
+                      onCell={onCell}
+                    />
+                  ))}
+                </div>
+                {shownRows.length > limit && (
+                  <button type="button" className="btn block lc-more" onClick={() => setLimit(limit + CARD_PAGE)}>
+                    더 보기 ({(shownRows.length - limit).toLocaleString("ko-KR")}행 남음)
+                  </button>
+                )}
+                <div className="lc-end" />
+              </>
             )}
           </>
         )

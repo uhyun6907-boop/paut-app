@@ -19,7 +19,7 @@ function dayLabel(iso: string): string {
 
 export function DayHistory({ records, site }: { records: InspectionRecord[]; site: string }) {
   const workLog = workLogByDate();
-  const days = useMemo(() => dayHistory(records, workLog, { workOnlyDays: true }), [records, workLog]);
+  const days = useMemo(() => dayHistory(records, workLog), [records, workLog]);
   const [limit, setLimit] = useState(PAGE);
   return (
     <section className="day-history" aria-label="날짜별 기록">
@@ -35,7 +35,7 @@ export function DayHistory({ records, site }: { records: InspectionRecord[]; sit
           <details key={d.date} className="day-entry">
             <summary>
               <b>{dayLabel(d.date)}</b>
-              <span className="cnt">{d.total ? `${d.total}개소` : "검사 없음"}{d.fail ? <em> 불 {d.fail}</em> : null}</span>
+              <span className="cnt">{`${d.total}개소`}{d.fail ? <em> 불 {d.fail}</em> : null}</span>
               <span className="who">{who || time ? [who, time].filter(Boolean).join(" ") : "근무자·시간 없음"}</span>
             </summary>
             <div className="day-work">
@@ -48,24 +48,27 @@ export function DayHistory({ records, site }: { records: InspectionRecord[]; sit
                 <span className="none">{NO_WORKLOG_TEXT}</span>
               )}
             </div>
-            {d.drawings.length === 0 ? (
-              <div className="day-none">이 현장 검사 기록 없음</div>
-            ) : (
-              <div className="day-lines">
-                <div className="day-line head"><span>도면</span><span>개수</span><span>판정</span></div>
-                {d.drawings.map((g) => (
-                  <div key={g.line} className={`day-line${g.fail ? " fail" : ""}`}>
+            <div className="day-lines">
+              {d.drawings.map((g) => (
+                <div key={g.line} className={`day-line${g.fail ? " fail" : ""}`}>
+                  <div className="day-line-head">
                     <span className="dwg">{g.line}{g.drawingNo ? <small> {g.drawingNo}</small> : null}</span>
-                    <span>{g.count}</span>
-                    <span>
-                      {g.pass ? <i className="ok">합 {g.pass}</i> : null}
-                      {g.fail ? <i className="bad"> 불 {g.fail}{g.failPoints.length ? ` (${g.failPoints.join(", ")})` : ""}</i> : null}
-                      {g.other ? <i> 기타 {g.other}</i> : null}
+                    <span className="sum">
+                      {g.count}개{g.pass ? <i className="ok"> · 합 {g.pass}</i> : null}
+                      {g.fail ? <i className="bad"> · 불 {g.fail}</i> : null}
+                      {g.other ? <i> · 기타 {g.other}</i> : null}
                     </span>
                   </div>
-                ))}
-              </div>
-            )}
+                  <div className="day-points" aria-label={`${g.line} 검사 포인트`}>
+                    {g.points.map((p, i) => (
+                      <span key={`${p.point}-${i}`} className={`day-pt${p.fail ? " bad" : p.result === "합격" ? "" : " other"}`} title={p.result}>
+                        {p.point}{p.fail ? " 불" : ""}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
           </details>
         );
       })}

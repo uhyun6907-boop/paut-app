@@ -23,6 +23,8 @@ export interface DayDrawing {
   fail: number;
   other: number;
   failPoints: string[];
+  /** 그날 이 도면에서 검사한 포인트(번호순). fail 이면 불합격(화면에서 강조). */
+  points: { point: string; result: string; fail: boolean }[];
 }
 
 export interface DayEntry {
@@ -39,10 +41,10 @@ export interface DayEntry {
 export const NO_WORKLOG_TEXT = "근무일지에 근무자·근무시간이 없습니다";
 
 /**
- * 날짜별로 묶는다(최근 날짜가 먼저). 검사 기록이 있거나 작업일지에 근무자·시간이 있는 날만.
+ * 날짜별로 묶는다(최근 날짜가 먼저). 이 현장에 검사 기록이 하나라도 있는 날만 — 작업일지에만 있는 날(다른 현장 근무 등)은 넣지 않는다.
  * records 는 보여 줄 현장의 기록(지운 기록은 뺀다). 입력 배열·객체는 바꾸지 않는다.
  */
-export function dayHistory(records: InspectionRecord[], workLog: Record<string, WorkLogInfo>, opts: { workOnlyDays?: boolean } = {}): DayEntry[] {
+export function dayHistory(records: InspectionRecord[], workLog: Record<string, WorkLogInfo>): DayEntry[] {
   const days = new Map<string, DayEntry & { byLine: Map<string, DayDrawing> }>();
   const day = (date: string) => {
     let d = days.get(date);
@@ -60,12 +62,13 @@ export function dayHistory(records: InspectionRecord[], workLog: Record<string, 
     const key = line.toUpperCase();
     let g = d.byLine.get(key);
     if (!g) {
-      g = { line, drawingNo: "", count: 0, pass: 0, fail: 0, other: 0, failPoints: [] };
+      g = { line, drawingNo: "", count: 0, pass: 0, fail: 0, other: 0, failPoints: [], points: [] };
       d.byLine.set(key, g);
     }
     if (!g.drawingNo && rec.drawingNo?.trim()) g.drawingNo = rec.drawingNo.trim();
     g.count++;
     d.total++;
+    g.points.push({ point: rec.point.trim(), result: rec.result, fail: rec.result === FAIL });
     if (rec.result === FAIL) {
       g.fail++;
       d.fail++;
@@ -78,15 +81,12 @@ export function dayHistory(records: InspectionRecord[], workLog: Record<string, 
       d.other++;
     }
   }
-  if (opts.workOnlyDays) {
-    for (const [date, w] of Object.entries(workLog)) {
-      if (/^\d{4}-\d{2}-\d{2}$/.test(date) && (w.workers.length || w.timeStart || w.timeEnd)) day(date);
-    }
-  }
   return [...days.values()]
     .map(({ byLine, ...d }) => ({
       ...d,
-      drawings: [...byLine.values()].sort((a, b) => a.line.localeCompare(b.line, "ko", { numeric: true })),
+      drawings: [...byLine.values()]
+        .map((g) => ({ ...g, points: [...g.points].sort((a, b) => a.point.localeCompare(b.point, "ko", { numeric: true })) }))
+        .sort((a, b) => a.line.localeCompare(b.line, "ko", { numeric: true })),
     }))
     .sort((a, b) => b.date.localeCompare(a.date));
 }

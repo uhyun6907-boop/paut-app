@@ -27,6 +27,7 @@ import { packTable, unpackTable } from "../store/listCache";
 import { CACHE_STALE_TEXT, loadListCache, mergeTables, openList, type CacheSlot, type ListView } from "./listLoad";
 import { BLANK, activeColumns, applyFilters, clearColumn, columnValues, countText, filterableColumns, setText, toggleValue, type ListFilters } from "./listFilter";
 import { getState, liveListClient } from "../store/session";
+import { CARD_PAGE, KEY_COLS, MODE_LABEL, pageRows, visibleColumns } from "./listLayout";
 
 const SITE = "드림 합정주공";
 let drive: FakeDrive;
@@ -260,6 +261,55 @@ describe("리스트 열 필터(앱 안에서만)", () => {
     expect(String(cells.get(`R${row.row}`)?.v)).toBe("12");
     expect(new Set([...cells.keys()].map((k) => k.replace(/^[A-Z]+/, ""))).size).toBe(beforeRows);
     expect(recs.length).toBeGreaterThan(0);
+  });
+});
+
+describe("리스트 휴대폰 카드 보기 · 주요 열 / 모든 열", () => {
+  it("기본은 주요 열 다섯(날짜·라인·포인트·판정·비고), '모든 열' 은 나머지 열까지", async () => {
+    const table = await fresh();
+    const key = visibleColumns(table.header, "key");
+    expect(key.map((c) => c.col)).toEqual(["E", "F", "G", "P", "S"]);
+    expect([...KEY_COLS]).toEqual(["E", "F", "G", "P", "S"]);
+    expect(key.find((c) => c.col === "F")!.title).toMatch(/line/i);
+    const all = visibleColumns(table.header, "all");
+    expect(all.length).toBeGreaterThan(key.length);
+    for (const c of key) expect(all.map((x) => x.col)).toContain(c.col);
+    expect(all.map((c) => c.col)).toEqual(expect.arrayContaining(["A", "B", "C", "D", "H", "K", "Q", "R"]));
+    // 머리글 순서 그대로
+    const order = table.header.map((h) => h.col);
+    expect(all.map((c) => c.col)).toEqual([...all.map((c) => c.col)].sort((a, b) => order.indexOf(a) - order.indexOf(b)));
+    expect(MODE_LABEL).toEqual({ key: "주요 열", all: "모든 열" });
+  });
+
+  it("카드 목록은 거른 행의 순번 순서 그대로, 앞에서부터 한 장씩(가로 표 없음)", async () => {
+    const table = await fresh();
+    const page = pageRows(table.rows, CARD_PAGE);
+    expect(page).toEqual(table.rows.slice(0, CARD_PAGE));
+    const seqs = table.rows.map((r) => r.cells[0].value).filter((v) => typeof v === "number") as number[];
+    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+    const pv = columnValues(table.rows, "P");
+    const filtered = applyFilters(table.rows, { P: { values: [pv[0].value], text: "" } });
+    const idx = filtered.map((r) => table.rows.indexOf(r));
+    expect(idx).toEqual([...idx].sort((a, b) => a - b)); // 필터 뒤에도 순서 그대로
+    expect(pageRows(filtered, 5)).toEqual(filtered.slice(0, 5));
+    expect(pageRows(filtered, filtered.length + 10)).toBe(filtered);
+  });
+
+  it("카드에서 주요 열(판정·포인트)을 고쳐도 그 칸 하나만 PATCH, 행 추가·'앱' 없음", async () => {
+    const table = await fresh();
+    const row = pageRows(table.rows, CARD_PAGE)[3];
+    const cols = visibleColumns(table.header, "key").map((c) => c.col);
+    const cell = row.cells.find((c) => c.col === "S" && cols.includes(c.col))!;
+    drive.log.length = 0;
+    await writeLiveCell(client(), table, cell, "카드에서 고침");
+    expect(writes()).toHaveLength(1);
+    expect(writes()[0].method).toBe("PATCH");
+    expect(writes()[0].path).toContain(`range(address='S${row.row}')`);
+    expect(JSON.stringify(writes())).not.toContain("앱");
+    expect(drive.log.some((e) => /\/insert|\/worksheets\/add/.test(e.path))).toBe(false);
+    const again = await fresh();
+    expect(again.rows.length).toBe(table.rows.length);
+    expect(again.rows.map((r) => r.row)).toEqual(table.rows.map((r) => r.row));
   });
 });
 

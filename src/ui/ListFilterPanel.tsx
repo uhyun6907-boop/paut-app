@@ -5,6 +5,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { LiveRow } from "../excel/liveList";
+import { KEY_COLS } from "./listLayout";
 import { activeColumns, clearColumn, columnValues, countText, filterableColumns, isActive, setText, toggleValue, type ListFilters } from "./listFilter";
 
 /** 한 번에 그리는 값 수(값이 아주 많은 열은 검색으로 좁힌다). */
@@ -20,7 +21,10 @@ export function FilterBar(props: {
 }) {
   const { header, filters, shown, total, onOpen, onClearAll } = props;
   const active = activeColumns(filters);
-  const quick = filterableColumns(header).filter((h) => ["E", "I", "P"].includes(h.col) || active.includes(h.col));
+  const all = filterableColumns(header);
+  // 주요 열(날짜·라인·포인트·판정·비고)과 지금 걸린 열은 바로, 나머지 열은 '다른 열' 에서 고른다.
+  const quick = all.filter((h) => (KEY_COLS as readonly string[]).includes(h.col) || active.includes(h.col));
+  const others = all.filter((h) => !quick.includes(h));
   return (
     <div className="filter-bar">
       <div className="filter-chips">
@@ -31,6 +35,21 @@ export function FilterBar(props: {
             {active.includes(h.col) ? " ●" : " ▾"}
           </button>
         ))}
+        {others.length > 0 && (
+          <select
+            className="chip chip-select"
+            aria-label="다른 열 필터"
+            value=""
+            onChange={(e) => {
+              if (e.target.value) onOpen(e.target.value);
+            }}
+          >
+            <option value="">다른 열 ▾</option>
+            {others.map((h) => (
+              <option key={h.col} value={h.col}>{h.title}</option>
+            ))}
+          </select>
+        )}
       </div>
       {active.length > 0 ? (
         <div className="filter-count" role="status">
@@ -38,7 +57,7 @@ export function FilterBar(props: {
           <button type="button" className="chip clear" onClick={onClearAll}>필터 모두 해제</button>
         </div>
       ) : (
-        <div className="filter-hint">머리글을 누르면 그 열로 거를 수 있습니다 · {total.toLocaleString("ko-KR")}행</div>
+        <div className="filter-hint">열 이름을 누르면 그 열로 거를 수 있습니다 · {total.toLocaleString("ko-KR")}행</div>
       )}
     </div>
   );

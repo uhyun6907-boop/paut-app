@@ -49,16 +49,47 @@ describe("날짜별 기록 · 검사 내역 + 근무일지 근무자·시간", (
     expect(NO_WORKLOG_TEXT).toMatch(/근무자.*근무시간이 없습니다/);
   });
 
-  it("작업일지만 있는 날도(옵션) 보이고, 빈 날은 없다. 지운 기록은 세지 않는다", () => {
+  it("이 현장에 검사가 없는 날(작업일지에만 있는 날·다른 현장 근무)은 보이지 않는다. 지운 기록은 세지 않는다", () => {
     const log = readWorkLog(unzipXlsx(fixture("real-worklog.xlsx")));
     const recs = realListRecords().filter((r) => r.site === SITE);
-    const withWork = dayHistory(recs, log, { workOnlyDays: true });
-    expect(withWork.some((d) => d.total === 0 && d.work)).toBe(true);
-    expect(withWork.every((d) => d.total > 0 || (d.work && (d.work.workers.length || d.work.timeStart)))).toBe(true);
+    const days = dayHistory(recs, log);
+    const inspected = new Set(recs.filter((r) => !r.deleted && /^\d{4}-\d{2}-\d{2}$/.test(r.date)).map((r) => r.date));
+    expect(days.every((d) => d.total > 0)).toBe(true);
+    expect(new Set(days.map((d) => d.date))).toEqual(inspected);
+    // 작업일지엔 있지만 합정주공 검사는 없는 날(예: 10/22 지성 브레인 근무)
+    const workOnly = Object.keys(log).filter((d) => !inspected.has(d));
+    expect(workOnly).toContain("2026-10-22");
+    for (const d of workOnly) expect(days.some((x) => x.date === d)).toBe(false);
+    // 다른 현장만 검사한 날도 없다
+    const otherSite = realListRecords().filter((r) => r.site !== SITE).map((r) => r.date).filter((d) => !inspected.has(d));
+    for (const d of otherSite) expect(days.some((x) => x.date === d)).toBe(false);
     const one = recs.find((r) => r.date === "2026-10-21")!;
-    const before = dayHistory(recs, log).find((d) => d.date === "2026-10-21")!.total;
+    const before = days.find((d) => d.date === "2026-10-21")!.total;
     const after = dayHistory(recs.map((r) => (r === one ? { ...r, deleted: true } : r)), log).find((d) => d.date === "2026-10-21")!.total;
     expect(after).toBe(before - 1);
+  });
+
+  it("날짜를 열면 그날 검사한 포인트 번호가 도면(라인)별로, 번호순, 불합격은 표시(fail)", () => {
+    const log = readWorkLog(unzipXlsx(fixture("real-worklog.xlsx")));
+    const recs = realListRecords().filter((r) => r.site === SITE);
+    for (const d of dayHistory(recs, log)) {
+      for (const g of d.drawings) {
+        const mine = recs.filter((r) => r.date === d.date && !r.deleted && r.line.trim().toUpperCase() === g.line.toUpperCase());
+        expect(g.points.map((p) => p.point).sort()).toEqual(mine.map((r) => r.point.trim()).sort());
+        expect(g.points.map((p) => p.point)).toEqual([...g.points.map((p) => p.point)].sort((a, b) => a.localeCompare(b, "ko", { numeric: true })));
+        expect(g.points.filter((p) => p.fail).map((p) => p.point).sort()).toEqual([...g.failPoints].sort());
+        expect(g.points.filter((p) => p.fail).length).toBe(g.fail);
+      }
+    }
+    // 불합격이 있는 날이 적어도 하나 있고, 그 포인트는 fail 로 표시된다.
+    const failDay = dayHistory(recs, log).find((d) => d.fail > 0)!;
+    expect(failDay).toBeTruthy();
+    const failed = recs.filter((r) => r.date === failDay.date && r.result === FAIL).map((r) => r.point.trim());
+    expect(failDay.drawings.flatMap((g) => g.points.filter((p) => p.fail).map((p) => p.point)).sort()).toEqual(failed.sort());
+    // 근무자·시간도 그대로(작업일지)
+    const d1021 = dayHistory(recs, log).find((d) => d.date === "2026-10-21")!;
+    expect(d1021.drawings.flatMap((g) => g.points).length).toBe(d1021.total);
+    expect(workersText(d1021.work)).toBe("조우현 · 심명보");
   });
 
   it("읽기만 한다: 기록·작업일지 사본을 바꾸지 않는다(엑셀에 쓰지 않음)", () => {
@@ -68,7 +99,7 @@ describe("날짜별 기록 · 검사 내역 + 근무일지 근무자·시간", (
     const recSnap = structuredClone(recs);
     rememberWork("ilji", fixture("real-worklog.xlsx"));
     const log = workLogByDate();
-    dayHistory(recs, log, { workOnlyDays: true });
+    dayHistory(recs, log);
     readWorkLog(files);
     expect(recs).toEqual(recSnap);
     expect(Object.fromEntries(Object.entries(files).map(([k, v]) => [k, Buffer.from(v).toString("base64")]))).toEqual(snapshot);
