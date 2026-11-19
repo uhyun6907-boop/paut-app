@@ -13,6 +13,7 @@ import {
   errorText,
   exportBook,
   hasBook,
+  listRecordsOnDevice,
   inspectorsOnDate,
   listFileOf,
   listLabel,
@@ -113,31 +114,23 @@ function emit(): void {
 
 function patch(partial: Partial<SessionState>): void {
   state = { ...state, ...partial };
-  if (partial.records || partial.meta) trackOriginals();
+  if (partial.meta) rememberDraftBaseline();
   emit();
 }
-
-/* ───────────── 초기화(저장 안 한 카드 표시 되돌리기) ───────────── */
 
 const ORIGINALS_KEY = "paut-unsaved-originals-v1";
 
 interface Originals {
-  /** 기록 id → 처음 미저장(local)이 되기 직전 모습. rec=null 이면 저장 뒤 새로 생긴 기록. */
-  recs: Record<string, { site: string; date: string; rec: InspectionRecord | null }>;
-  /** 현장별 마지막 저장 때의 회색 카드(키 `현장||라인||접두어`). 현장 키가 없으면 아직 기준 없음. */
   drafts: Record<string, Record<string, DraftCard[]>>;
 }
-
-/** 지금 현장·작업일의 저장된(미저장 아님) 기록 사본. 다음 편집 직전 모습을 알기 위해 patch 때마다 갱신한다. */
-const cleanCopy = new Map<string, InspectionRecord>();
 
 function readOriginals(): Originals {
   try {
     const raw = localStorage.getItem(ORIGINALS_KEY);
     const parsed = raw ? (JSON.parse(raw) as Partial<Originals>) : {};
-    return { recs: parsed.recs ?? {}, drafts: parsed.drafts ?? {} };
+    return { drafts: parsed.drafts ?? {} };
   } catch {
-    return { recs: {}, drafts: {} };
+    return { drafts: {} };
   }
 }
 
@@ -156,38 +149,21 @@ function sameDrafts(a: Record<string, DraftCard[]>, b: Record<string, DraftCard[
   return norm(a) === norm(b);
 }
 
-/**
- * 편집으로 기록이 처음 미저장이 될 때 그 직전 모습(cleanCopy)을 기억한다. 회색 카드는 현장별 기준이 없으면 지금 모습을 기준으로.
- * 저장(commitDay)·초기화 때 그 현장·날짜 기억을 지운다.
- */
-function trackOriginals(): void {
-  const { lastSite, workDate } = state.meta ?? ({} as DayMeta);
-  if (!lastSite || !state.records) return;
+function rememberDraftBaseline(): void {
+  const lastSite = state.meta?.lastSite;
+  if (!lastSite) return;
   const o = readOriginals();
-  let changed = false;
-  for (const rec of state.records) {
-    if (rec.site !== lastSite || rec.date !== workDate) continue;
-    if (rec.sync === "local") {
-      if (!(rec.id in o.recs)) {
-        const prev = cleanCopy.get(rec.id);
-        // 저장 때 모습을 모르는데 이미 엑셀에 들어간 기록(초기화 배포 전부터 미저장으로 남았던 R02 등)은
-        // '새 카드'가 아니다 → 기억하지 않는다(초기화가 지우지 않음).
-        if (!prev && wasSent(rec)) continue;
-        o.recs[rec.id] = { site: rec.site, date: rec.date, rec: prev ? structuredClone(prev) : null };
-        changed = true;
-      }
-    } else {
-      cleanCopy.set(rec.id, structuredClone(rec));
-    }
-  }
-  if (!(lastSite in o.drafts)) {
-    o.drafts[lastSite] = structuredClone(siteDrafts(state.meta.draftCards, lastSite));
-    changed = true;
-  }
-  if (changed) writeOriginals(o);
+  if (lastSite in o.drafts) return;
+  o.drafts[lastSite] = structuredClone(siteDrafts(state.meta.draftCards, lastSite));
+  writeOriginals(o);
 }
 
-/** 한 번이라도 엑셀(또는 엑셀에서 읽은 행)에 있는 기록. 초기화가 '새 카드'로 보고 지우면 안 된다. */
+function changedDraftSites(draftCards: DayMeta["draftCards"]): string[] {
+  return Object.entries(readOriginals().drafts)
+    .filter(([site, base]) => !sameDrafts(base, siteDrafts(draftCards, site)))
+    .map(([site]) => site);
+}
+
 function wasSent(rec: InspectionRecord): boolean {
   return !!rec.excelRow || !!rec.steps || rec.src !== "user" || !!rec.movedFrom?.length;
 }
@@ -196,27 +172,52 @@ function neverSent(rec: InspectionRecord): boolean {
   return rec.sync === "local" && !wasSent(rec);
 }
 
-/** 지금 현장·작업일에 되돌릴 수 있는 미저장 카드 표시 수(초기화 버튼을 켤지). */
-export function resettableCount(records: InspectionRecord[], meta: DayMeta): number {
-  const { lastSite, workDate } = meta;
-  const o = readOriginals();
-  const recs = Object.entries(o.recs).filter(([, v]) => v.site === lastSite && v.date === workDate);
-  const ids = new Set(records.filter((r) => r.site === lastSite && r.date === workDate && r.sync === "local").map((r) => r.id));
-  const n = recs.filter(([id, v]) => ids.has(id) || v.rec !== null).length;
-  const base = o.drafts[lastSite];
-  const draftsChanged = base !== undefined && !sameDrafts(base, siteDrafts(meta.draftCards, lastSite));
-  return n + (draftsChanged ? 1 : 0);
+function markLocal(rec: InspectionRecord): void {
+  if (rec.sync !== "local") {
+    const { lastSaved: _, ...saved } = rec;
+    rec.lastSaved = structuredClone(saved);
+  }
+  rec.sync = "local";
+  rec.syncError = undefined;
 }
 
-function forgetOriginals(site: string, date: string, drafts: DayMeta["draftCards"]): void {
-  const o = readOriginals();
-  for (const [id, v] of Object.entries(o.recs)) if (v.site === site && v.date === date) delete o.recs[id];
-  o.drafts[site] = structuredClone(siteDrafts(drafts, site));
-  writeOriginals(o);
+function markDeleted(rec: InspectionRecord): void {
+  if (rec.result === "없음") rec.sync = "synced";
+  else markLocal(rec);
+  rec.deleted = true;
+}
+
+function queueLocal(rec: InspectionRecord): void {
+  rec.sync = "pending";
+  rec.steps = undefined;
+  rec.syncError = undefined;
+  delete rec.lastSaved;
+}
+
+/** 초기화 버튼을 켤지: 어느 현장·날짜든 저장 안 한 기록이나 회색 카드 변화가 있으면. */
+export function resettableCount(records: InspectionRecord[], meta: DayMeta): number {
+  return records.filter((r) => r.sync === "local").length + changedDraftSites(meta.draftCards).length;
+}
+
+function savedVersion(rec: InspectionRecord, onDeviceListRow: (rec: InspectionRecord) => InspectionRecord | undefined): InspectionRecord | null {
+  if (rec.lastSaved) {
+    const back = structuredClone(rec.lastSaved);
+    if (back.sync === "syncing") back.sync = "pending";
+    return back;
+  }
+  if (!wasSent(rec)) return null;
+  const { lastSaved: _, deleted: __, ...kept } = rec;
+  const row = onDeviceListRow(rec);
+  return {
+    ...kept,
+    ...(row ? { date: row.date, line: row.line, point: row.point, result: row.result } : {}),
+    sync: rec.steps ? aggregateSteps(rec.steps).status : "synced",
+    syncError: undefined,
+  };
 }
 
 /**
- * 초기화: 지금 현장·작업일에서 마지막 저장 뒤 바꾼 카드 표시(합격/불합격·새 카드·회색 카드)를 저장 때 모습으로 되돌린다.
+ * 초기화: 어느 현장·날짜든 마지막 저장 뒤 바꾼 카드(합격/불합격·지움·새 카드·회색 카드)를 저장 때 모습으로 되돌린다.
  * 저장하지 않고 엑셀에도 보내지 않는다.
  */
 export function resetUnsaved(): Promise<void> {
@@ -224,38 +225,33 @@ export function resetUnsaved(): Promise<void> {
 }
 
 async function resetUnsavedNow(): Promise<void> {
-  const { lastSite, workDate } = state.meta;
-  const o = readOriginals();
-  let records = [...state.records];
+  const books = new Map<ListBookKind, Map<string, InspectionRecord>>();
+  const onDeviceListRow = (rec: InspectionRecord) => {
+    const book = listBookOf(rec);
+    if (!books.has(book)) books.set(book, listRecordsOnDevice(book));
+    return books.get(book)!.get(rec.id);
+  };
   let n = 0;
-  for (const [id, v] of Object.entries(o.recs)) {
-    if (v.site !== lastSite || v.date !== workDate) continue;
-    const i = records.findIndex((r) => r.id === id);
-    if (v.rec === null) {
-      if (i >= 0 && records[i].sync === "local" && !wasSent(records[i])) {
-        records = records.filter((r) => r.id !== id);
-        n += 1;
-      }
-    } else {
-      const back = structuredClone(v.rec);
-      // 보내는 중에 고친 기록이었다면 다시 보낼 대기로 둔다(같은 내용이라 엑셀은 그대로).
-      if (back.sync === "syncing" || back.sync === "local") back.sync = "pending";
-      if (i >= 0) records[i] = back;
-      else records.push(back);
-      n += 1;
+  const records: InspectionRecord[] = [];
+  for (const rec of state.records) {
+    if (rec.sync !== "local") {
+      records.push(rec);
+      continue;
     }
+    n += 1;
+    const back = savedVersion(rec, onDeviceListRow);
+    if (back) records.push(back);
   }
-  const base = o.drafts[lastSite];
+  const o = readOriginals();
   let draftCards = state.meta.draftCards ?? {};
-  if (base !== undefined && !sameDrafts(base, siteDrafts(draftCards, lastSite))) {
-    draftCards = Object.fromEntries(Object.entries(draftCards).filter(([key]) => !key.startsWith(`${lastSite}||`)));
-    Object.assign(draftCards, structuredClone(base));
+  for (const site of changedDraftSites(draftCards)) {
+    draftCards = { ...Object.fromEntries(Object.entries(draftCards).filter(([key]) => !key.startsWith(`${site}||`))), ...structuredClone(o.drafts[site]) };
     n += 1;
   }
   state.records = records;
   state.meta = { ...state.meta, draftCards };
-  forgetOriginals(lastSite, workDate, draftCards);
-  resetUnsavedDirectR(lastSite, workDate);
+  writeOriginals({ drafts: Object.fromEntries(Object.keys(o.drafts).map((site) => [site, structuredClone(siteDrafts(draftCards, site))])) });
+  resetUnsavedDirectR();
   patch({ records: [...state.records], meta: state.meta });
   await persistRecords();
   await persistMeta();
@@ -724,27 +720,6 @@ export function commitDay(): Promise<void> {
   return enqueue(commitDayNow);
 }
 
-/**
- * 지난 날(작업일 이전)에 '미저장'으로 남은 기록(저장하지 않고 앱을 닫았거나 다른 현장에서 고침).
- * 시작할 때 대기열에 넣는다(내용이 바뀐 기록이라 세 파일 모두 다시).
- */
-function promoteStaleLocals(records: InspectionRecord[], workDate: string): number {
-  let n = 0;
-  for (const rec of records) {
-    if (rec.sync !== "local" || rec.date >= workDate) continue;
-    if (rec.result === "없음") {
-      rec.sync = "synced";
-      continue;
-    }
-    if (rec.deleted && neverSent(rec)) continue;
-    rec.sync = "pending";
-    rec.steps = undefined;
-    rec.syncError = undefined;
-    n += 1;
-  }
-  return n;
-}
-
 async function commitDayNow(): Promise<void> {
   const { lastSite, workDate } = state.meta;
   const toCommit = state.records.filter((rec) => rec.site === lastSite && (rec.date === workDate || rec.sync === "local"));
@@ -763,10 +738,7 @@ async function commitDayNow(): Promise<void> {
     }
     if (rec.deleted && neverSent(rec)) continue;
     if (rec.sync === "local") {
-      // 내용이 바뀌었으니 세 파일 모두 다시 쓴다(리스트는 Y 앱 ID 로 같은 행).
-      rec.sync = "pending";
-      rec.steps = undefined;
-      rec.syncError = undefined;
+      queueLocal(rec);
     } else if (metaDirty) {
       // 검사자·근무시간만 바뀜 → 작업일지만 다시.
       rec.sync = "pending";
@@ -793,7 +765,7 @@ async function commitDayNow(): Promise<void> {
   patch({ records: [...state.records] });
   await persistRecords();
   saved.stamps[stampKey] = stampOf(state.meta);
-  forgetOriginals(lastSite, workDate, state.meta.draftCards);
+  writeOriginals({ drafts: { ...readOriginals().drafts, [lastSite]: structuredClone(siteDrafts(state.meta.draftCards, lastSite)) } });
   commitDirectR(lastSite, workDate);
   try {
     localStorage.setItem(UNSAVED_KEY, JSON.stringify({ records: state.records.filter((rec) => rec.sync === "local"), draftCards: state.meta.draftCards ?? {}, stamps: saved.stamps }));
@@ -1069,7 +1041,6 @@ async function doInit(): Promise<void> {
     const config = mergeConfig(savedConfig, inspectors, lengths, sitesOf(records));
     const meta = { ...emptyMeta(), ...savedMeta };
     restoreUnsaved(records ?? [], meta);
-    if (records && promoteStaleLocals(records, meta.workDate)) await kvSet("records", records);
     if (records && rerouteGmRecords(records)) await kvSet("records", records);
     const knownSites = sitesOf(records);
     if (!meta.lastSite || !knownSites.includes(meta.lastSite)) {
@@ -1190,14 +1161,9 @@ function clearDirectR(scope: Scope, rPoint: string): void {
   writeSr({ ...cur, independent: cur.independent.filter((item) => !hit(item)), unsaved: (cur.unsaved ?? []).filter((item) => !hit(item)) });
 }
 
-/** 초기화: 이 현장·날짜에서 마지막 저장 뒤에 생긴 R 직접 편집 표시를 지운다(되돌린 R 은 다시 S 를 따라간다). */
-function resetUnsavedDirectR(site: string, date: string): void {
+function resetUnsavedDirectR(): void {
   const cur = readSr();
-  const mine = (item: string) => {
-    const [s, , d] = item.split("|");
-    return s === site && d === date;
-  };
-  const drop = new Set((cur.unsaved ?? []).filter(mine));
+  const drop = new Set(cur.unsaved ?? []);
   if (!drop.size) return;
   writeSr({ ...cur, independent: cur.independent.filter((item) => !drop.has(item)), unsaved: (cur.unsaved ?? []).filter((item) => !drop.has(item)) });
 }
@@ -1348,10 +1314,9 @@ async function mirrorResult(sPoint: string, result: ResultKind, scope: Scope, in
   if (existing) {
     // 'R2'(엑셀) 와 'R02' 는 같은 번호: 결과가 같으면 저장된 R 을 건드리지 않는다.
     if (existing.result !== result || pointId(existing.point) !== pointId(rPoint)) {
+      markLocal(existing);
       existing.result = result;
       existing.point = rPoint;
-      existing.sync = "local";
-      existing.syncError = undefined;
     }
     if (result === FAIL) addReinspectDraft(existing.id, rPoint, scope);
     else dropReinspectOf(existing.id);
@@ -1375,10 +1340,7 @@ async function mirrorRemove(sPoint: string, scope: Scope, index: number): Promis
   if (existing) {
     dropReinspectOf(existing.id);
     if (neverSent(existing)) state.records = state.records.filter((rec) => rec.id !== existing.id);
-    else {
-      existing.deleted = true;
-      existing.sync = existing.result === "없음" ? "synced" : "local";
-    }
+    else markDeleted(existing);
   }
   stripPlainDraft(rPoint, scope);
   await persistMirror();
@@ -1394,8 +1356,8 @@ async function mirrorRenameNow(oldPoint: string, newPoint: string, scope: Scope,
   if (!from || !to || mirrorBlocked(to, scope) || mirrorBlocked(from, scope)) return;
   const existing = mirrorTarget(from, scope, index);
   if (existing) {
+    if (existing.result !== "없음") markLocal(existing);
     existing.point = to;
-    if (existing.result !== "없음") existing.sync = "local";
   }
   const parsed = parsePoint(from);
   if (parsed) {
@@ -1450,10 +1412,7 @@ async function mirrorAbsent(sPoint: string, scope: Scope, removeIndex: number | 
     if (existing && existing.result !== "없음") {
       dropReinspectOf(existing.id);
       if (neverSent(existing)) state.records = state.records.filter((rec) => rec.id !== existing.id);
-      else {
-        existing.deleted = true;
-        existing.sync = "local";
-      }
+      else markDeleted(existing);
     }
   }
   stripPlainDraft(rPoint, scope);
@@ -1710,9 +1669,8 @@ export function setResult(id: string, result: ResultKind): Promise<void> {
 async function setResultNow(id: string, result: ResultKind): Promise<void> {
   const rec = state.records.find((r) => r.id === id);
   if (!rec || rec.deleted) return;
+  markLocal(rec);
   rec.result = result;
-  rec.sync = "local";
-  rec.syncError = undefined;
   patch({ records: [...state.records] });
   await persistRecords();
   mirrorUnsaved();
@@ -1743,10 +1701,7 @@ async function removeRecordNow(id: string, quiet = false): Promise<void> {
   const scope = scopeOf(rec);
   const index = ordinalOf(rec);
   if (neverSent(rec)) state.records = state.records.filter((item) => item.id !== id);
-  else {
-    rec.deleted = true;
-    rec.sync = rec.result === "없음" ? "synced" : "local";
-  }
+  else markDeleted(rec);
   const dropped = withoutReinspect(id);
   if (dropped.changed) state.meta = { ...state.meta, draftCards: dropped.draftCards };
   patch({ records: [...state.records], meta: state.meta });
@@ -1786,13 +1741,13 @@ async function renamePointNow(id: string, pointLabel: string): Promise<void> {
   const scope = scopeOf(rec);
   const index = ordinalOf(rec);
   const point = parsed.suffix ? parsed.raw : fmtPoint(parsed.prefix, parsed.num);
+  if (rec.result !== "없음") markLocal(rec);
   rec.point = point;
   const draftCards = { ...(state.meta.draftCards ?? {}) };
   for (const [key, list] of Object.entries(draftCards)) {
     draftCards[key] = list.map((card) => (card.reinspectOf === id ? { ...card, point } : card));
   }
   state.meta = { ...state.meta, draftCards };
-  if (rec.result !== "없음") rec.sync = "local";
   patch({ records: [...state.records], meta: state.meta });
   await persistRecords();
   await persistMeta();
@@ -1834,9 +1789,7 @@ async function changeRecordDateNow(id: string, date: string): Promise<void> {
     if (item.result === "없음") continue;
     const sent = item.sync !== "local" || !!item.excelRow || !!item.steps;
     if (sent) item.movedFrom = [...new Set([...(item.movedFrom ?? []), from])].filter((d) => d !== date);
-    item.sync = "pending";
-    item.steps = undefined;
-    item.syncError = undefined;
+    queueLocal(item);
     item.syncNote = undefined;
   }
   patch({ records: [...state.records] });
@@ -1859,8 +1812,8 @@ async function markNoWeldNow(id: string): Promise<void> {
   const index = ordinalOf(rec);
   const parsed = parsePoint(rec.point);
   const main = parsed ? fmtPoint(parsed.prefix, parsed.num) : rec.point;
+  markLocal(rec);
   rec.deleted = true;
-  rec.sync = rec.result === "없음" || !rec.excelRow ? "local" : "local";
   const dropped = withoutReinspect(id);
   if (dropped.changed) state.meta = { ...state.meta, draftCards: dropped.draftCards };
   const hasSkip = state.records.some((r) => !r.deleted && r.site === rec.site && r.line === rec.line && pointId(r.point) === pointId(main) && r.result === "없음");
@@ -1874,6 +1827,7 @@ async function markNoWeldNow(id: string): Promise<void> {
       sync: "synced",
       src: "user",
       ts: Date.now(),
+      lastSaved: undefined,
     });
   }
   patch({ records: [...state.records], meta: state.meta });

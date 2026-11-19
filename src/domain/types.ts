@@ -107,7 +107,11 @@ export interface InspectionRecord {
    */
   movedFrom?: string[];
   ts: number;
+  /** sync 가 "local" 인 동안만 있다: 처음 미저장이 되기 직전(마지막 저장) 모습. 초기화가 이 모습으로 되돌린다. */
+  lastSaved?: SavedRecord;
 }
+
+export type SavedRecord = Omit<InspectionRecord, "lastSaved">;
 
 export interface SiteBundle {
   site: string;

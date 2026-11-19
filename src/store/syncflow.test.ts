@@ -9,7 +9,7 @@ import { parseListWorkbook } from "../excel/listBook";
 import { readPautRows, readStatement } from "../excel/statementBook";
 import { readSheet } from "../excel/ooxml";
 import type { FakeDrive } from "../test/fakeGraph";
-import { ILJI_ID, LIST_GM_ID, LIST_GM_NAME, LIST_ID, STMT_ID, fixture, graphConfig, meta, realDrive, realListRecords, rec } from "../test/realBooks";
+import { ILJI_ID, LIST_GM_ID, LIST_GM_NAME, LIST_ID, STMT_ID, fixture, graphConfig, meta, realDrive, realGmRecords, realListRecords, rec } from "../test/realBooks";
 import { userCreatesMonthSheet } from "../test/userSheet";
 import { workbookSheets } from "../excel/ooxml";
 import { headerStatus, loginBannerModel, settingsAuthModel, syncPanelModel } from "./syncStatus";
@@ -380,10 +380,15 @@ describe("11/11 HJ-M-005-350A S28 이 리스트에 안 들어간 문제", () => 
     expect(iljiDayRow("2026-11-11")).toMatchObject({ K: "8" });
   });
 
-  it("지난 날 '미저장'으로 남은 마지막 기록도 다시 켜면 대기열에 넣어 보낸다", async () => {
+  it("지난 날 '미저장'으로 남은 기록은 다시 켜도 보내지 않고 미저장으로 남는다. 저장을 누르면 그때 보낸다", async () => {
     const s28 = rec("S28", PASS, { date: "2026-11-11", sync: "local" });
     seed([...realListRecords(), s28], { workDate: "2026-11-12" });
     const s = await startApp();
+    expect(listIds()).not.toContain(s28.id);
+    expect(s.getState().records.find((r) => r.id === s28.id)?.sync).toBe("local");
+    expect(s.unsavedCount()).toBe(1);
+    await s.commitDay();
+    await s.syncIdle();
     expect(listIds()).toContain(s28.id);
     expect(s.getState().records.find((r) => r.id === s28.id)?.sync).toBe("synced");
   });
@@ -1057,5 +1062,102 @@ describe("카드를 지우면 엑셀 세 파일에서 모두 빠진다", () => {
     expect(listIds()).not.toContain(id);
     expect(iljiDayRow("2026-11-12")).toMatchObject({ J: "350A", K: "1" });
     expect(stmtCount("2026-11-12")).toBe(1);
+  });
+});
+
+describe("지성 마전 PA 003 S06·R06(엑셀 118·125행, 앱 ID 없음)을 잘못 눌러 회색으로 만든 뒤", () => {
+  const SITE = "지성 마전 PA";
+  const LINE = "MJDH-D-D-P-58-003-200A";
+  const S06 = `xlsx:${SITE}:118`;
+  const R06 = `xlsx:${SITE}:125`;
+
+  function seedMajeon(): void {
+    seed([...realListRecords(), ...realGmRecords()], { lastSite: SITE, activeLine: LINE, workDate: "2026-11-20" });
+    mem.set("book:listGm", fixture("real-list-gunpo-majeon.xlsx"));
+  }
+
+  function gmRow(row: number): { E: string; F: string; G: string; P: string } {
+    const { cells } = readSheet(drive.files(LIST_GM_ID), SITE);
+    const v = (col: string) => cells.get(col + row)?.v ?? "";
+    return { E: v("E"), F: v("F"), G: v("G"), P: v("P") };
+  }
+
+  const gmWrites = () => drive.requests((e) => e.item === LIST_GM_ID && e.method !== "GET");
+  const visible = (s: Session, id: string) => s.getState().records.some((r) => r.id === id && !r.deleted);
+
+  async function greyTapS06(s: Session): Promise<void> {
+    const ui = await import("../ui/EntryView");
+    await ui.applyTap(`rec:${S06}`, 1);
+    await s.settled();
+    expect(visible(s, S06)).toBe(false);
+    expect(visible(s, R06)).toBe(false);
+  }
+
+  it("다른 현장으로 옮긴 뒤 초기화해도 S06·R06 이 엑셀 모습으로 돌아오고 엑셀에는 아무것도 보내지 않는다", async () => {
+    seedMajeon();
+    const before = [gmRow(118), gmRow(125)];
+    const s = await startApp();
+    await greyTapS06(s);
+    await s.selectSite("드림 합정주공");
+
+    await s.resetUnsaved();
+    await s.settled();
+    await s.syncIdle();
+
+    for (const id of [S06, R06]) {
+      expect(visible(s, id)).toBe(true);
+      expect(s.getState().records.find((r) => r.id === id)).toMatchObject({ sync: "synced", result: PASS, date: "2026-06-10" });
+    }
+    expect(s.unsavedCount()).toBe(0);
+    expect(gmWrites()).toHaveLength(0);
+    expect([gmRow(118), gmRow(125)]).toEqual(before);
+
+    const again = await startApp();
+    expect(visible(again, S06) && visible(again, R06)).toBe(true);
+    expect(gmWrites()).toHaveLength(0);
+  });
+
+  it("저장을 누르지 않았으면 앱을 다시 켜도 지움 표시를 엑셀로 보내지 않는다(118·125행 그대로, 미저장으로 남음)", async () => {
+    seedMajeon();
+    const before = [gmRow(118), gmRow(125)];
+    const s = await startApp();
+    await greyTapS06(s);
+
+    const again = await startApp();
+    expect(gmWrites()).toHaveLength(0);
+    expect([gmRow(118), gmRow(125)]).toEqual(before);
+    expect(again.unsavedCount()).toBe(2);
+    expect(again.syncQueue(again.getState().records)).toHaveLength(0);
+  });
+
+  it("이미 배포된 판이 남긴 지움 표시(초기화용 원본 기억 없음)도 초기화하면 엑셀 사본에서 되살린다", async () => {
+    seedMajeon();
+    const records = mem.get("records") as InspectionRecord[];
+    for (const r of records) if (r.id === S06 || r.id === R06) Object.assign(r, { deleted: true, sync: "local" });
+    mem.set("records", records);
+    bag.set("paut-unsaved-v1", JSON.stringify({ records: records.filter((r) => r.sync === "local"), draftCards: {}, stamps: {} }));
+    const s = await startApp();
+    expect(visible(s, S06) || visible(s, R06)).toBe(false);
+    expect(gmWrites()).toHaveLength(0);
+
+    await s.resetUnsaved();
+    await s.settled();
+    await s.syncIdle();
+    expect(visible(s, S06) && visible(s, R06)).toBe(true);
+    expect(s.getState().records.find((r) => r.id === S06)).toMatchObject({ sync: "synced", excelRow: 118, point: "S06" });
+    expect(gmWrites()).toHaveLength(0);
+    const again = await startApp();
+    expect(visible(again, S06) && visible(again, R06)).toBe(true);
+    expect(gmWrites()).toHaveLength(0);
+  });
+
+  it("저장을 누르면 그때만 지움을 보낸다", async () => {
+    seedMajeon();
+    const s = await startApp();
+    await greyTapS06(s);
+    await s.commitDay();
+    await s.syncIdle();
+    expect(gmRow(118).P).toBe("");
+    expect(gmRow(125).P).toBe("");
   });
 });

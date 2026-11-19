@@ -89,6 +89,12 @@ export function hasBook(kind: BookKind): boolean {
   return !!work[kind];
 }
 
+export function listRecordsOnDevice(book: ListBookKind): Map<string, InspectionRecord> {
+  const files = work[book];
+  if (!files) return new Map();
+  return new Map(parseListWorkbook(files, book).flatMap((site) => site.records).map((rec) => [rec.id, rec]));
+}
+
 export function exportBook(kind: BookKind): Uint8Array {
   const files = work[kind];
   if (!files) throw new Error("통합 문서가 아직 없습니다.");
