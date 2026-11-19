@@ -60,11 +60,9 @@ export function reinspectLabel(point: string): string | null {
 
 export type CardPhase = "draft" | "pass" | "fail";
 
-/** 회색(미입력) → 합격 → 불합격 → 회색. */
-export function cycleCard(phase: CardPhase): CardPhase {
-  if (phase === "draft") return "pass";
-  if (phase === "pass") return "fail";
-  return "draft";
+/** 탭 결과. 회색을 한 번 누르면 합격, 그 밖(두 번 이상 누름, 이미 기록된 카드)은 회색. 불합격은 편집 창의 리페어 처리로만. */
+export function tapPhase(phase: CardPhase, taps: number): "draft" | "pass" {
+  return phase === "draft" && taps === 1 ? "pass" : "draft";
 }
 
 /** + 카드가 만들 다음 본번호. 재검사(같은 번호)는 occupied 에 넣지 않는다. */

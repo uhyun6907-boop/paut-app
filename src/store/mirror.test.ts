@@ -41,7 +41,7 @@ import {
   settled,
   updateMeta,
 } from "./session";
-import { applyPaint } from "../ui/EntryView";
+import { applyPaint, applyTap, setEditResult } from "../ui/EntryView";
 import { PaintGesture } from "../ui/paint";
 
 const DATE = "2026-11-12";
@@ -431,5 +431,48 @@ describe("S→R 자동", () => {
     expect(today("S25").map((rec) => rec.result)).toEqual([PASS]);
     expect(today("R25").map((rec) => rec.result)).toEqual([PASS]);
     expect(excelBound("S26")).toEqual([]);
+  });
+
+  it("두 번 탭: 회색 S 는 회색 그대로, 합격 S 는 회색이 되고 불합격·재검사 카드·R 불합격은 생기지 않는다", async () => {
+    const key = `${SITE}||${LINE}||S`;
+    await setLineDrafts(key, [{ id: "d-S90", point: "S90" }]);
+    await mirrorGreyDraft("S90");
+    await applyTap("draft:d-S90", 2);
+    expect(today("S90")).toEqual([]);
+    expect(today("R90")).toEqual([]);
+    expect(getState().meta.draftCards?.[key]?.map((card) => [card.point, !!card.reinspectOf])).toEqual([["S90", false]]);
+    expect(rDrafts().map((card) => [card.point, !!card.reinspectOf])).toEqual([["R90", false]]);
+
+    await savePoint(PASS, "S91");
+    await applyTap(`rec:${today("S91")[0].id}`, 2);
+    await settled();
+    expect(today("S91")).toEqual([]);
+    expect(getState().meta.draftCards?.[key]?.map((card) => [card.point, !!card.reinspectOf])).toEqual([["S90", false], ["S91", false]]);
+    expect(getState().records.filter((rec) => !rec.deleted && rec.result === FAIL)).toEqual([]);
+    expect(rDrafts().some((card) => card.reinspectOf)).toBe(false);
+
+    await applyTap("draft:d-S90", 1);
+    expect(today("S90").map((rec) => rec.result)).toEqual([PASS]);
+    expect(today("R90").map((rec) => rec.result)).toEqual([PASS]);
+  });
+
+  it("리페어 처리(편집 창): S 가 불합격이 되고 R 이 따라가며 재검사 회색 카드가 붙고, S 를 지우면 짝 R 도 지워진다", async () => {
+    const key = `${SITE}||${LINE}||S`;
+    await setLineDrafts(key, [{ id: "d-S95", point: "S95" }]);
+    await setEditResult({ kind: "draft", id: "d-S95" }, FAIL);
+    const s95 = today("S95");
+    expect(s95.map((rec) => rec.result)).toEqual([FAIL]);
+    expect(today("R95").map((rec) => rec.result)).toEqual([FAIL]);
+    expect(getState().meta.draftCards?.[key]?.map((card) => [card.point, card.reinspectOf])).toEqual([["S95", s95[0].id]]);
+    expect(rDrafts().map((card) => [card.point, !!card.reinspectOf])).toEqual([["R95", true]]);
+
+    await savePoint(PASS, "S96");
+    await setEditResult({ kind: "record", id: today("S96")[0].id }, FAIL);
+    expect(today("S96").map((rec) => rec.result)).toEqual([FAIL]);
+    expect(today("R96").map((rec) => rec.result)).toEqual([FAIL]);
+
+    await removeRecord(s95[0].id);
+    expect(today("S95")).toEqual([]);
+    expect(today("R95")).toEqual([]);
   });
 });

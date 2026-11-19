@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { advanceAfterSave, canonicalPoint, cycleCard, directionFromTrail, expandRange, fmtFullPoint, fmtPoint, nextDraftPoint, nextNumber, nextPointLabel, orderPointCards, mirrorPoint, parsePoint, planPrefixCopy, pointCells, reinspectLabel, stepNumber, suggestNumber } from "./point";
+import { advanceAfterSave, canonicalPoint, directionFromTrail, expandRange, fmtFullPoint, fmtPoint, nextDraftPoint, nextNumber, nextPointLabel, orderPointCards, mirrorPoint, parsePoint, planPrefixCopy, pointCells, reinspectLabel, stepNumber, suggestNumber, tapPhase } from "./point";
 
 describe("포인트 번호", () => {
   it("두 자리로 맞춘다", () => {
@@ -63,10 +63,13 @@ describe("포인트 번호", () => {
     expect(nextPointLabel(["S14", "S16", "S15"], "S")).toBe("S17");
   });
 
-  it("카드는 회색, 합격, 불합격 순으로 돌고 + 는 빈 번호를 만든다", () => {
-    expect(cycleCard("draft")).toBe("pass");
-    expect(cycleCard("pass")).toBe("fail");
-    expect(cycleCard("fail")).toBe("draft");
+  it("회색 카드는 한 번 누르면 합격, 두 번 누르면 회색 그대로이고 탭으로는 불합격이 되지 않으며 + 는 빈 번호를 만든다", () => {
+    expect(tapPhase("draft", 1)).toBe("pass");
+    expect(tapPhase("draft", 2)).toBe("draft");
+    expect(tapPhase("draft", 3)).toBe("draft");
+    expect(tapPhase("pass", 1)).toBe("draft");
+    expect(tapPhase("pass", 2)).toBe("draft");
+    expect(tapPhase("fail", 1)).toBe("draft");
     expect(reinspectLabel("S15")).toBe("S15");
     expect(reinspectLabel("r01-6")).toBe("R01-6");
     expect(canonicalPoint("s1")).toBe("S01");

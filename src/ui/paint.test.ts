@@ -166,7 +166,7 @@ describe("카드 길게 누르기(날짜 고치기) vs 탭 vs 드래그", () => 
     };
   }
 
-  it("약 0.5초 누르면 날짜 창이 한 번 열리고, 이어지는 click 은 탭(합격/불합격 전환)이 아니다", () => {
+  it("약 0.5초 누르면 날짜 창이 한 번 열리고, 이어지는 click 은 탭(합격/회색 전환)이 아니다", () => {
     const t = touch();
     t.down();
     vi.advanceTimersByTime(LONG_PRESS_MS - 1);

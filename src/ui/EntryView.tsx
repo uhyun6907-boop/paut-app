@@ -4,14 +4,13 @@ import { DayHistory } from "./DayHistory";
 import { defectStats, latestLine, lineSummary, linesByLatestDate, shortDate, sortLineRows } from "../domain/history";
 import {
   canonicalPoint,
-  cycleCard,
   fmtFullPoint,
   directionFromTrail,
   nextDraftPoint,
   orderPointCards,
   parsePoint,
   reinspectLabel,
-  type CardPhase,
+  tapPhase,
   type WalkDirection,
 } from "../domain/point";
 import { isRemovedSite, mappingFor } from "../domain/mapping";
@@ -217,11 +216,10 @@ export function EntryView() {
     slot.steps += 1;
     window.clearTimeout(slot.timer);
     slot.timer = window.setTimeout(() => {
-      const steps = slot.steps % 3;
+      const taps = slot.steps;
       slot.steps = 0;
       pending.current.delete(key);
-      if (!steps) return;
-      run(() => applyTap(key, steps));
+      run(() => applyTap(key, taps));
     }, TAP_WAIT);
     pending.current.set(key, slot);
   }
@@ -553,7 +551,7 @@ export function EntryView() {
             <h3>{editingRecord?.point ?? editingDraft?.point ?? "포인트"}</h3>
             <div className="edit-grid">
               <button className="pass" type="button" onClick={() => void run(() => setEditResult(edit, PASS)).then(() => setEdit(null))}>합격</button>
-              <button className="fail" type="button" onClick={() => void run(() => setEditResult(edit, FAIL)).then(() => setEdit(null))}>불합격</button>
+              <button className="fail" type="button" onClick={() => void run(() => setEditResult(edit, FAIL)).then(() => setEdit(null))}>리페어 처리</button>
               <button type="button" onClick={() => void run(() => markEditGrey(edit)).then(() => setEdit(null))}>미입력</button>
               <button type="button" onClick={() => void run(() => markEditAbsent(edit)).then(() => setEdit(null))}>없음</button>
               <button className="wide" type="button" onClick={() => void applyNumber(edit, addSub(pointNow()))}>-1</button>
@@ -819,42 +817,16 @@ function PointCard({ label, paintKey, date, state, caption, re, armed, onTap, on
   );
 }
 
-async function applyTap(key: string, steps: number): Promise<void> {
-  const live = getState();
+export async function applyTap(key: string, taps: number): Promise<void> {
   if (key.startsWith("draft:")) {
-    const id = key.slice(6);
-    const found = findDraftEntry(live.meta.draftCards, id);
-    if (!found) return;
-    let phase: CardPhase = "draft";
-    for (let i = 0; i < steps; i++) phase = cycleCard(phase);
-    if (phase === "draft") return;
-    const saved = await savePoint(phase === "pass" ? PASS : FAIL, found.card.point);
-    if (!saved) return;
-    await dropDraft(id);
-    if (phase === "fail") await ensureReinspect(saved, found.card.point);
+    const target = { kind: "draft" as const, id: key.slice(6) };
+    if (tapPhase("draft", taps) === "pass") await setEditResult(target, PASS);
     return;
   }
   const id = key.slice(4);
   const rec = getState().records.find((item) => item.id === id && !item.deleted);
   if (!rec || rec.result === "없음") return;
-  let phase: CardPhase = rec.result === FAIL ? "fail" : "pass";
-  for (let i = 0; i < steps; i++) phase = cycleCard(phase);
-  if (phase === "fail") {
-    if (rec.result !== FAIL) await setResult(id, FAIL);
-    await ensureReinspect(id, rec.point);
-    return;
-  }
-  if (phase === "pass") {
-    await clearGreyReinspect(id);
-    if (rec.result !== PASS) await setResult(id, PASS);
-    return;
-  }
-  await clearGreyReinspect(id);
-  const parent = parentFail(getState().records, rec);
-  const point = canonicalPoint(rec.point);
-  await removeRecord(id, true);
-  if (parent && point) await ensureReinspect(parent.id, point);
-  else if (point) await addPlainDraft(point);
+  if (tapPhase(rec.result === FAIL ? "fail" : "pass", taps) === "draft") await markEditGrey({ kind: "record", id });
 }
 
 /** 손가락 아래의 카드. 터치는 처음 카드에 잡혀 있으므로 target 대신 좌표로 찾는다. */
@@ -939,7 +911,7 @@ async function renameEdit(edit: { kind: "record" | "draft"; id: string }, raw: s
   if (parsePoint(previous)?.prefix === "S") await mirrorRename(previous, label, getState().meta.workDate);
 }
 
-async function setEditResult(edit: { kind: "record" | "draft"; id: string }, result: typeof PASS | typeof FAIL): Promise<void> {
+export async function setEditResult(edit: { kind: "record" | "draft"; id: string }, result: typeof PASS | typeof FAIL): Promise<void> {
   if (edit.kind === "draft") {
     const found = findDraftEntry(getState().meta.draftCards, edit.id);
     if (!found) return;
