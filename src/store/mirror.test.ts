@@ -133,12 +133,9 @@ describe("S→R 자동", () => {
     expect(today("R23")[0].result).toBe(PASS);
 
     const stored = (await kvGet<InspectionRecord[]>("records")) ?? [];
-    const unsaved = JSON.parse(bag.get("paut-unsaved-v1") ?? "{}") as { records?: { point: string; result: string; date: string }[] };
+    expect(bag.has("paut-unsaved-v1")).toBe(false);
     const merged = new Map<string, string>();
     for (const rec of stored) {
-      if (rec.date === DATE) merged.set(norm(rec.point), rec.result);
-    }
-    for (const rec of unsaved.records ?? []) {
       if (rec.date === DATE) merged.set(norm(rec.point), rec.result);
     }
     for (const point of ["R23", "R24", "R26", "R27", "R28", "R23-1"]) expect(merged.get(point)).toBe(PASS);
@@ -397,13 +394,9 @@ describe("S→R 자동", () => {
     await savePoint(PASS, "S28");
     expect(today("R28").map((rec) => rec.result)).toEqual([PASS]);
 
-    // 저장소(IndexedDB)와 미저장 백업에도 되돌린 카드가 없다.
     const stored = (await kvGet<InspectionRecord[]>("records")) ?? [];
-    const unsaved = JSON.parse(bag.get("paut-unsaved-v1") ?? "{}") as { records?: InspectionRecord[] };
-    for (const rows of [stored, unsaved.records ?? []]) {
-      const points = rows.filter((rec) => rec.line === LINE).map((rec) => norm(rec.point));
-      for (const point of ["S26", "S27", "R26", "R27"]) expect(points, point).not.toContain(point);
-    }
+    const points = stored.filter((rec) => rec.line === LINE).map((rec) => norm(rec.point));
+    for (const point of ["S26", "S27", "R26", "R27"]) expect(points, point).not.toContain(point);
   });
 
   it("되돌리기: 불합격 카드에서 시작했어도 처음 자리로 돌아와 떼면 불합격 그대로", async () => {

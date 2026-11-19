@@ -396,6 +396,23 @@ describe("11/11 HJ-M-005-350A S28 이 리스트에 안 들어간 문제", () => 
     expect(s.getState().records.find((r) => r.id === s28.id)?.sync).toBe("synced");
   });
 
+  it("검사자·근무시간만 바꿔도 미저장 1: 저장 때 남긴 그날 값(dayStaff)과 비교하고, 다시 켜도 그대로이며 저장하면 0", async () => {
+    seed([...realListRecords(), rec("S28", PASS, { sync: "local" })]);
+    let s = await startApp();
+    await s.commitDay();
+    await s.syncIdle();
+    expect(s.unsavedCount()).toBe(0);
+    await s.updateMeta({ insp2: "김정환" });
+    expect(s.unsavedCount()).toBe(1);
+    s = await startApp();
+    expect(s.unsavedCount()).toBe(1);
+    expect([...bag.keys()].filter((k) => k.startsWith("paut-unsaved"))).toEqual([]);
+    await s.commitDay();
+    await s.syncIdle();
+    expect(s.unsavedCount()).toBe(0);
+    expect(iljiDayRow("2026-11-12")).toMatchObject({ Q: "김정환" });
+  });
+
   it("마지막 카드를 누르자마자 저장해도 그 카드가 저장(대기열)에 들어간다", async () => {
     seed(realListRecords(), { workDate: "2026-11-11" });
     const s = await startApp();
@@ -1116,6 +1133,8 @@ describe("지성 마전 PA 003 S06·R06(엑셀 118·125행, 앱 ID 없음)을 �
     const s = await startApp();
     expect(visible(s, S06) || visible(s, R06)).toBe(false);
     expect(gmWrites()).toHaveLength(0);
+    expect(bag.has("paut-unsaved-v1")).toBe(false);
+    expect((mem.get("records") as InspectionRecord[]).find((r) => r.id === S06)).toMatchObject({ deleted: true, sync: "local" });
 
     await s.resetUnsaved();
     await s.settled();

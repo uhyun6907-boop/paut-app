@@ -114,28 +114,8 @@ function emit(): void {
 
 function patch(partial: Partial<SessionState>): void {
   state = { ...state, ...partial };
-  if (partial.meta) rememberDraftBaseline();
+  if (partial.meta) state.meta = withDraftBaseline(state.meta);
   emit();
-}
-
-const ORIGINALS_KEY = "paut-unsaved-originals-v1";
-
-interface Originals {
-  drafts: Record<string, Record<string, DraftCard[]>>;
-}
-
-function readOriginals(): Originals {
-  try {
-    const raw = localStorage.getItem(ORIGINALS_KEY);
-    const parsed = raw ? (JSON.parse(raw) as Partial<Originals>) : {};
-    return { drafts: parsed.drafts ?? {} };
-  } catch {
-    return { drafts: {} };
-  }
-}
-
-function writeOriginals(o: Originals): void {
-  try { localStorage.setItem(ORIGINALS_KEY, JSON.stringify(o)); } catch { /* 저장 불가 */ }
 }
 
 function siteDrafts(draftCards: DayMeta["draftCards"], site: string): Record<string, DraftCard[]> {
@@ -149,19 +129,20 @@ function sameDrafts(a: Record<string, DraftCard[]>, b: Record<string, DraftCard[
   return norm(a) === norm(b);
 }
 
-function rememberDraftBaseline(): void {
-  const lastSite = state.meta?.lastSite;
-  if (!lastSite) return;
-  const o = readOriginals();
-  if (lastSite in o.drafts) return;
-  o.drafts[lastSite] = structuredClone(siteDrafts(state.meta.draftCards, lastSite));
-  writeOriginals(o);
+function withDraftBaseline(meta: DayMeta): DayMeta {
+  const site = meta.lastSite;
+  if (!site || (meta.draftBaseline && site in meta.draftBaseline)) return meta;
+  return { ...meta, draftBaseline: { ...meta.draftBaseline, [site]: structuredClone(siteDrafts(meta.draftCards, site)) } };
 }
 
-function changedDraftSites(draftCards: DayMeta["draftCards"]): string[] {
-  return Object.entries(readOriginals().drafts)
-    .filter(([site, base]) => !sameDrafts(base, siteDrafts(draftCards, site)))
+function changedDraftSites(meta: DayMeta): string[] {
+  return Object.entries(meta.draftBaseline ?? {})
+    .filter(([site, base]) => !sameDrafts(base, siteDrafts(meta.draftCards, site)))
     .map(([site]) => site);
+}
+
+function baselineOf(meta: DayMeta, sites: string[]): DayMeta["draftBaseline"] {
+  return { ...meta.draftBaseline, ...Object.fromEntries(sites.map((site) => [site, structuredClone(siteDrafts(meta.draftCards, site))])) };
 }
 
 function wasSent(rec: InspectionRecord): boolean {
@@ -196,7 +177,7 @@ function queueLocal(rec: InspectionRecord): void {
 
 /** 초기화 버튼을 켤지: 어느 현장·날짜든 저장 안 한 기록이나 회색 카드 변화가 있으면. */
 export function resettableCount(records: InspectionRecord[], meta: DayMeta): number {
-  return records.filter((r) => r.sync === "local").length + changedDraftSites(meta.draftCards).length;
+  return records.filter((r) => r.sync === "local").length + changedDraftSites(meta).length;
 }
 
 function savedVersion(rec: InspectionRecord, onDeviceListRow: (rec: InspectionRecord) => InspectionRecord | undefined): InspectionRecord | null {
@@ -232,6 +213,7 @@ async function resetUnsavedNow(): Promise<void> {
     return books.get(book)!.get(rec.id);
   };
   let n = 0;
+  dropDirectRFlags(state.records.filter((rec) => rec.sync === "local" && parsePoint(rec.point)?.prefix === "R"));
   const records: InspectionRecord[] = [];
   for (const rec of state.records) {
     if (rec.sync !== "local") {
@@ -242,20 +224,17 @@ async function resetUnsavedNow(): Promise<void> {
     const back = savedVersion(rec, onDeviceListRow);
     if (back) records.push(back);
   }
-  const o = readOriginals();
+  const baseline = state.meta.draftBaseline ?? {};
   let draftCards = state.meta.draftCards ?? {};
-  for (const site of changedDraftSites(draftCards)) {
-    draftCards = { ...Object.fromEntries(Object.entries(draftCards).filter(([key]) => !key.startsWith(`${site}||`))), ...structuredClone(o.drafts[site]) };
+  for (const site of changedDraftSites(state.meta)) {
+    draftCards = { ...Object.fromEntries(Object.entries(draftCards).filter(([key]) => !key.startsWith(`${site}||`))), ...structuredClone(baseline[site]) };
     n += 1;
   }
   state.records = records;
   state.meta = { ...state.meta, draftCards };
-  writeOriginals({ drafts: Object.fromEntries(Object.keys(o.drafts).map((site) => [site, structuredClone(siteDrafts(draftCards, site))])) });
-  resetUnsavedDirectR();
   patch({ records: [...state.records], meta: state.meta });
   await persistRecords();
   await persistMeta();
-  mirrorUnsaved();
   toast(n ? "저장 안 한 표시를 되돌렸습니다" : "되돌릴 표시가 없습니다");
 }
 
@@ -578,7 +557,6 @@ function dropErrorSteps(steps: FileSteps | undefined): FileSteps | undefined {
   return next;
 }
 
-const UNSAVED_KEY = "paut-unsaved-v1";
 /** 거래명세서에서 앱이 쓴 줄(엑셀에는 표시를 남기지 않으므로 이 기기에 기억). */
 const OWNERSHIP_KEY = "statementOwned";
 
@@ -602,43 +580,46 @@ export function pendingCount(records: InspectionRecord[]): number {
   return records.filter(isJob).length;
 }
 
-function mirrorUnsaved(): void {
-  try {
-    const records = state.records.filter((rec) => rec.sync === "local");
-    const prev = readUnsaved();
-    localStorage.setItem(UNSAVED_KEY, JSON.stringify({
-      records,
-      draftCards: state.meta.draftCards ?? {},
-      stamps: prev.stamps,
-    }));
-  } catch { /* 사생활 보호 모드 */ }
-}
+const LEGACY_UNSAVED_KEY = "paut-unsaved-v1";
+const LEGACY_ORIGINALS_KEY = "paut-unsaved-originals-v1";
 
-function readUnsaved(): { records: InspectionRecord[]; draftCards: DayMeta["draftCards"]; stamps: Record<string, string> } {
+function readLegacy<T>(key: string): Partial<T> {
   try {
-    const raw = localStorage.getItem(UNSAVED_KEY);
-    if (!raw) return { records: [], draftCards: {}, stamps: {} };
-    const parsed = JSON.parse(raw) as { records?: InspectionRecord[]; draftCards?: DayMeta["draftCards"]; stamps?: Record<string, string> };
-    return { records: parsed.records ?? [], draftCards: parsed.draftCards ?? {}, stamps: parsed.stamps ?? {} };
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as Partial<T>) : {};
   } catch {
-    return { records: [], draftCards: {}, stamps: {} };
+    return {};
   }
 }
 
-function restoreUnsaved(records: InspectionRecord[], meta: DayMeta): void {
-  const saved = readUnsaved();
+/** 예전 판이 localStorage 에 따로 남긴 미저장 사본을 한 번 기록·meta 로 옮기고 지운다. */
+function takeLegacyUnsaved(records: InspectionRecord[], meta: DayMeta): boolean {
+  const unsaved = readLegacy<{ records: InspectionRecord[]; draftCards: DayMeta["draftCards"] }>(LEGACY_UNSAVED_KEY);
+  const originals = readLegacy<{ drafts: DayMeta["draftBaseline"] }>(LEGACY_ORIGINALS_KEY);
+  if (!unsaved.records && !unsaved.draftCards && !originals.drafts) return false;
   const byId = new Map(records.map((rec) => [rec.id, rec]));
-  for (const rec of saved.records) {
+  for (const rec of unsaved.records ?? []) {
     if (rec.sync !== "local") continue;
     const prev = byId.get(rec.id);
     if (!prev) records.push(rec);
     else Object.assign(prev, rec);
   }
-  meta.draftCards = { ...(meta.draftCards ?? {}), ...(saved.draftCards ?? {}) };
+  meta.draftCards = { ...meta.draftCards, ...unsaved.draftCards };
+  meta.draftBaseline = { ...originals.drafts, ...meta.draftBaseline };
+  return true;
 }
 
-function stampOf(meta: DayMeta): string {
-  return [meta.insp1, meta.insp2, meta.dayType, meta.timeStart, meta.timeEnd].join("|");
+function forgetLegacyUnsaved(): void {
+  try {
+    localStorage.removeItem(LEGACY_UNSAVED_KEY);
+    localStorage.removeItem(LEGACY_ORIGINALS_KEY);
+  } catch { /* 저장소 접근 불가 */ }
+}
+
+function staffChanged(meta: DayMeta): boolean {
+  const saved = meta.dayStaff?.[meta.workDate];
+  if (!saved) return false;
+  return saved.insp1 !== meta.insp1 || saved.insp2 !== meta.insp2 || saved.dayType !== meta.dayType || saved.timeStart !== meta.timeStart || saved.timeEnd !== meta.timeEnd;
 }
 
 /**
@@ -652,10 +633,7 @@ export function unsavedEdits(records: InspectionRecord[], meta: Pick<DayMeta, "l
 }
 
 export function unsavedCount(): number {
-  const { lastSite, workDate } = state.meta;
-  const saved = readUnsaved().stamps[`${lastSite}|${workDate}`];
-  const metaDirty = saved !== undefined && saved !== stampOf(state.meta) ? 1 : 0;
-  return unsavedEdits(state.records, state.meta) + metaDirty;
+  return unsavedEdits(state.records, state.meta) + (staffChanged(state.meta) ? 1 : 0);
 }
 
 /**
@@ -669,9 +647,7 @@ export function commitDay(): Promise<void> {
 async function commitDayNow(): Promise<void> {
   const { lastSite, workDate } = state.meta;
   const toCommit = state.records.filter((rec) => rec.site === lastSite && (rec.date === workDate || rec.sync === "local"));
-  const stampKey = `${lastSite}|${workDate}`;
-  const saved = readUnsaved();
-  const metaDirty = saved.stamps[stampKey] !== undefined && saved.stamps[stampKey] !== stampOf(state.meta);
+  const metaDirty = staffChanged(state.meta);
   const locals = toCommit.filter((rec) => rec.sync === "local");
   if (!locals.length && !metaDirty && !toCommit.some((rec) => !rec.deleted && rec.result !== "없음")) {
     toast("저장할 내용이 없습니다");
@@ -704,18 +680,13 @@ async function commitDayNow(): Promise<void> {
         timeEnd: state.meta.timeEnd,
       },
     },
+    draftBaseline: baselineOf(state.meta, [lastSite]),
   };
   void persistMeta();
   state.records = state.records.filter((rec) => !(rec.deleted && neverSent(rec)));
   const places = state.records.filter((rec) => !rec.deleted && rec.site === lastSite && rec.date === workDate && rec.result === PASS).length;
   patch({ records: [...state.records] });
   await persistRecords();
-  saved.stamps[stampKey] = stampOf(state.meta);
-  writeOriginals({ drafts: { ...readOriginals().drafts, [lastSite]: structuredClone(siteDrafts(state.meta.draftCards, lastSite)) } });
-  commitDirectR(lastSite, workDate);
-  try {
-    localStorage.setItem(UNSAVED_KEY, JSON.stringify({ records: state.records.filter((rec) => rec.sync === "local"), draftCards: state.meta.draftCards ?? {}, stamps: saved.stamps }));
-  } catch { /* 저장 불가 */ }
   toast(`저장됨 · ${places}개소`);
   requestSync();
 }
@@ -983,7 +954,12 @@ async function doInit(): Promise<void> {
     }
     const config = mergeConfig(savedConfig, inspectors, lengths, sitesOf(records));
     const meta = { ...emptyMeta(), ...savedMeta };
-    restoreUnsaved(records ?? [], meta);
+    const migrated = takeLegacyUnsaved(records, meta);
+    if (migrated) {
+      await kvSet("records", records);
+      await kvSet("meta", meta);
+      forgetLegacyUnsaved();
+    }
     if (records && rerouteGmRecords(records)) await kvSet("records", records);
     const knownSites = sitesOf(records);
     if (!meta.lastSite || !knownSites.includes(meta.lastSite)) {
@@ -1073,18 +1049,15 @@ function sameLine(a: string, b: string): boolean {
 
 const SR_KEY = "paut-sr-mirror";
 
-/**
- * independent: 사용자가 R 결과를 직접 고친 번호(현장|라인|날짜|번호). 그 R 은 S 를 따라가지 않는다.
- * unsaved: 그중 마지막 저장 뒤에 생긴 표시. 초기화하면 R 과 함께 이 표시도 되돌린다.
- */
-type SrMirrorStore = { enabled: boolean; independent: string[]; unsaved?: string[] };
+/** independent: 사용자가 R 결과를 직접 고친 번호(현장|라인|날짜|번호). 그 R 은 S 를 따라가지 않는다. */
+type SrMirrorStore = { enabled: boolean; independent: string[] };
 
 function readSr(): SrMirrorStore {
   try {
     const raw = localStorage.getItem(SR_KEY);
     if (!raw) return { enabled: true, independent: [] };
     const parsed = JSON.parse(raw) as Partial<SrMirrorStore>;
-    return { enabled: parsed.enabled !== false, independent: parsed.independent ?? [], unsaved: parsed.unsaved ?? [] };
+    return { enabled: parsed.enabled !== false, independent: parsed.independent ?? [] };
   } catch {
     return { enabled: true, independent: [] };
   }
@@ -1100,25 +1073,14 @@ function sameSrKey(item: string, scope: Scope, rPoint?: string): boolean {
 function clearDirectR(scope: Scope, rPoint: string): void {
   const cur = readSr();
   const hit = (item: string) => sameSrKey(item, scope, rPoint);
-  if (!cur.independent.some(hit) && !(cur.unsaved ?? []).some(hit)) return;
-  writeSr({ ...cur, independent: cur.independent.filter((item) => !hit(item)), unsaved: (cur.unsaved ?? []).filter((item) => !hit(item)) });
+  if (!cur.independent.some(hit)) return;
+  writeSr({ ...cur, independent: cur.independent.filter((item) => !hit(item)) });
 }
 
-function resetUnsavedDirectR(): void {
+function dropDirectRFlags(rRecords: InspectionRecord[]): void {
   const cur = readSr();
-  const drop = new Set(cur.unsaved ?? []);
-  if (!drop.size) return;
-  writeSr({ ...cur, independent: cur.independent.filter((item) => !drop.has(item)), unsaved: (cur.unsaved ?? []).filter((item) => !drop.has(item)) });
-}
-
-/** 저장: 이 현장·날짜의 R 직접 편집 표시는 이제 저장된 결정이다(초기화로 지우지 않음). */
-function commitDirectR(site: string, date: string): void {
-  const cur = readSr();
-  const keep = (cur.unsaved ?? []).filter((item) => {
-    const [s, , d] = item.split("|");
-    return !(s === site && d === date);
-  });
-  if (keep.length !== (cur.unsaved ?? []).length) writeSr({ ...cur, unsaved: keep });
+  const next = cur.independent.filter((item) => !rRecords.some((rec) => sameSrKey(item, scopeOf(rec), rec.point)));
+  if (next.length !== cur.independent.length) writeSr({ ...cur, independent: next });
 }
 
 function writeSr(next: SrMirrorStore): void {
@@ -1148,7 +1110,7 @@ export function noteDirectR(point: string, date = state.meta.workDate, where?: {
   const cur = readSr();
   if (cur.independent.some((item) => sameSrKey(item, scope, point))) return;
   const key = srKey(scope, point);
-  writeSr({ ...cur, independent: [...cur.independent, key], unsaved: [...(cur.unsaved ?? []), key] });
+  writeSr({ ...cur, independent: [...cur.independent, key] });
 }
 
 /**
@@ -1209,7 +1171,6 @@ async function persistMirror(): Promise<void> {
   patch({ records: [...state.records], meta: state.meta });
   await persistRecords();
   await persistMeta();
-  mirrorUnsaved();
 }
 
 function blankRecord(point: string, result: ResultKind | "없음", scope: Scope, sync: InspectionRecord["sync"]): InspectionRecord {
@@ -1328,7 +1289,6 @@ async function mirrorGreyDraftNow(sPoint: string): Promise<void> {
   state.meta = { ...state.meta, draftCards };
   patch({ meta: state.meta });
   await persistMeta();
-  mirrorUnsaved();
 }
 
 export function mirrorDropGrey(sPoint: string): Promise<void> {
@@ -1343,7 +1303,6 @@ async function mirrorDropGreyNow(sPoint: string): Promise<void> {
   stripPlainDraft(rPoint, scope);
   patch({ meta: state.meta });
   await persistMeta();
-  mirrorUnsaved();
 }
 
 /** S 가 없음이 되면 R 도 없음. removeIndex 가 있으면 그 순번의 R 기록을 지운다. */
@@ -1442,7 +1401,6 @@ async function savePointNow(result: ResultKind, pointLabel: string): Promise<str
   state.records = [...state.records, rec];
   patch({ records: state.records });
   await persistRecords();
-  mirrorUnsaved();
   if (parsed.prefix === "R") noteDirectR(point, rec.date, rec);
   if (parsed.prefix === "S") await mirrorResult(point, result, scopeOf(rec), ordinalOf(rec));
   return rec.id;
@@ -1510,7 +1468,6 @@ export async function copyDayPrefix(from: string, to: string): Promise<number> {
   patch({ records: state.records, meta: state.meta });
   await persistRecords();
   await persistMeta();
-  mirrorUnsaved();
   toast(`${from.toUpperCase()} → ${to.toUpperCase()} ${planned.length}개 복사`);
   return planned.length;
 }
@@ -1602,7 +1559,6 @@ export async function saveMany(rows: { point: string; result: ResultKind }[]): P
   state.records = [...state.records, ...added];
   patch({ records: state.records });
   await persistRecords();
-  mirrorUnsaved();
 }
 
 export function setResult(id: string, result: ResultKind): Promise<void> {
@@ -1616,7 +1572,6 @@ async function setResultNow(id: string, result: ResultKind): Promise<void> {
   rec.result = result;
   patch({ records: [...state.records] });
   await persistRecords();
-  mirrorUnsaved();
   const parsed = parsePoint(rec.point);
   if (parsed?.prefix === "R") noteDirectR(rec.point, rec.date, rec);
   if (parsed?.prefix === "S") await mirrorResult(rec.point, result, scopeOf(rec), ordinalOf(rec));
@@ -1650,7 +1605,6 @@ async function removeRecordNow(id: string, quiet = false): Promise<void> {
   patch({ records: [...state.records], meta: state.meta });
   await persistRecords();
   if (dropped.changed) await persistMeta();
-  mirrorUnsaved();
   if (!quiet) toast("삭제했습니다. 저장을 누르면 엑셀에도 반영됩니다");
   const parsed = parsePoint(removedPoint);
   if (parsed?.prefix === "R") noteDirectR(removedPoint, scope.date, scope);
@@ -1694,7 +1648,6 @@ async function renamePointNow(id: string, pointLabel: string): Promise<void> {
   patch({ records: [...state.records], meta: state.meta });
   await persistRecords();
   await persistMeta();
-  mirrorUnsaved();
   toast(`${point} 로 바꿈`);
   if (parsePoint(previous)?.prefix === "R") {
     noteDirectR(previous, scope.date, scope);
@@ -1737,7 +1690,6 @@ async function changeRecordDateNow(id: string, date: string): Promise<void> {
   }
   patch({ records: [...state.records] });
   await persistRecords();
-  mirrorUnsaved();
   toast(`${rec.point} 날짜 → ${date.slice(5).replace("-", "/")}`);
   requestSync();
 }
@@ -1777,7 +1729,6 @@ async function markNoWeldNow(id: string): Promise<void> {
   await persistRecords();
   if (dropped.changed) await persistMeta();
   toast(`${main} 없음`);
-  mirrorUnsaved();
   if (parsePoint(original)?.prefix === "R") noteDirectR(original, scope.date, scope);
   if (parsePoint(original)?.prefix === "S") await mirrorAbsent(original, scope, index);
 }
@@ -1793,7 +1744,6 @@ async function setLineDraftsNow(key: string, drafts: DraftCard[]): Promise<void>
   state.meta = { ...state.meta, draftCards };
   patch({ meta: state.meta });
   await persistMeta();
-  mirrorUnsaved();
 }
 
 export async function undoLast(): Promise<void> {
@@ -2068,6 +2018,5 @@ export function applyListCellEdit(recordId: string, fields: Partial<InspectionRe
     state.records[at] = rec;
     patch({ records: [...state.records] });
     await persistRecords();
-    if (rec.sync === "local") mirrorUnsaved();
   });
 }

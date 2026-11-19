@@ -138,6 +138,8 @@ export interface DayMeta {
   dayStaff?: Record<string, DayStaff>;
   /** 아직 저장하지 않은 회색 카드. 키는 `현장||라인||접두어`. */
   draftCards?: Record<string, DraftCard[]>;
+  /** 현장별 마지막 저장(또는 초기화) 때의 회색 카드. 초기화가 이 모습으로 되돌린다. */
+  draftBaseline?: Record<string, Record<string, DraftCard[]>>;
 }
 
 /** 저장 전 카드. reinspectOf 가 있으면 그 불합격 행의 재검사(같은 포인트 번호). */
