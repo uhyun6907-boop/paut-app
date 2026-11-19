@@ -73,9 +73,11 @@ describe("포인트 번호", () => {
     expect(reinspectLabel("S15")).toBe("S15");
     expect(reinspectLabel("r01-6")).toBe("R01-6");
     expect(canonicalPoint("s1")).toBe("S01");
-    expect(nextDraftPoint({ direction: "up", prefix: "S", occupied: [14, 16], lastEntered: 16 })).toBe("S17");
-    expect(nextDraftPoint({ direction: "down", prefix: "S", occupied: [29, 28], lastEntered: 28 })).toBe("S27");
-    expect(nextDraftPoint({ direction: "up", prefix: "S", occupied: [16, 17], lastEntered: 16 })).toBe("S18");
+    expect(nextDraftPoint({ direction: "up", prefix: "S", occupied: [1, 2, 3, 4, 5, 7, 25], lastEntered: 25 })).toBe("S06");
+    expect(nextDraftPoint({ direction: "up", prefix: "S", occupied: [1, 2, 3, 4, 5, 6, 7, 25], lastEntered: 25 })).toBe("S08");
+    expect(nextDraftPoint({ direction: "up", prefix: "R", occupied: [2, 3], lastEntered: 3 })).toBe("R01");
+    expect(nextDraftPoint({ direction: "up", prefix: "S", occupied: [1, 2, 3], lastEntered: 3 })).toBe("S04");
+    expect(nextDraftPoint({ direction: "up", prefix: "P", occupied: [], lastEntered: null })).toBe("P01");
   });
 
   it("S 번호는 같은 R 번호로 대응한다", () => {

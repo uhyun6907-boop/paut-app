@@ -326,7 +326,6 @@ export function EntryView() {
       const tail = plain.length ? parsePoint(plain[plain.length - 1].point)?.num ?? null : trail.at(-1) ?? null;
       const label = nextDraftPoint({ direction, prefix, occupied, lastEntered: tail });
       await setLineDrafts(key, [...list, { id: crypto.randomUUID(), point: label }]);
-      // 회색 R 카드를 더하는 것은 R 결과를 고친 것이 아니다 → S→R 자동을 막지 않는다(예전: R 탭 + 로 만든 R29~R31 이 S 를 영영 안 따라감).
       if (prefix === "S") await mirrorGreyDraft(label);
     });
   }

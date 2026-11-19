@@ -107,6 +107,9 @@ export function nextDraftPoint(args: {
   occupied: number[];
   lastEntered: number | null;
 }): string {
+  const taken = new Set(args.occupied);
+  const top = Math.max(0, ...args.occupied);
+  for (let n = 1; n < top; n++) if (!taken.has(n)) return fmtPoint(args.prefix, n);
   return fmtPoint(args.prefix, suggestNumber({
     direction: args.direction,
     recorded: args.occupied,
