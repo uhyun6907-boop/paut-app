@@ -31,7 +31,7 @@ vi.mock("./db", () => ({
 const tokenCalls: { forceRefresh?: boolean; interactive?: boolean }[] = [];
 /** 가짜 로그인 상태: "ok" 면 토큰을 주고, "lost" 면 LoginRequiredError. */
 const auth = vi.hoisted(() => ({
-  mode: "ok" as "ok" | "lost" | "lostAfter" | "hang" | "hangAfter" | "expired" | "network",
+  mode: "ok" as "ok" | "lost" | "lostAfter" | "timeout" | "timeoutAfter" | "expired" | "network",
   /** true 면 캐시(force 아님)는 옛 토큰을 준다(드라이브는 이미 새 토큰만 받음). */
   stale: false,
   /** true 면 force 로 받아도 옛 토큰(실제로 로그인이 끊겨 Graph 가 계속 401). */
@@ -68,7 +68,10 @@ vi.mock("../sync/msal", () => {
         if (auth.okCalls <= 0) throw new LoginRequiredError();
         auth.okCalls -= 1;
       }
-      if (auth.mode === "hang" || (auth.mode === "hangAfter" && auth.okCalls-- <= 0)) return new Promise<string>(() => undefined);
+      if (auth.mode === "timeout" || (auth.mode === "timeoutAfter" && auth.okCalls-- <= 0)) {
+        const { TimeoutError, TOKEN_TIMEOUT_TEXT } = await import("../sync/timeout");
+        throw new TimeoutError(TOKEN_TIMEOUT_TEXT);
+      }
       if (auth.forceBroken || (auth.stale && !options.forceRefresh)) return "stale-token";
       st.markAuthOk();
       return drive.validToken;
@@ -700,14 +703,12 @@ describe("아이폰: '로그인이 만료되었습니다(1건)' + '보내는 중
     noDupList();
   });
 
-  it("토큰 받기가 멈추면(응답 없음) 시간 제한 뒤 '보내는 중'이 풀리고 기록은 대기, 다시 시도 버튼을 누를 수 있다", async () => {
+  it("토큰 요청이 시간 초과로 끝나면 '보내는 중'이 풀리고 기록은 대기, 다시 시도 버튼을 누를 수 있다", async () => {
     const recs = today();
     const ids = recs.map((r) => r.id);
     seed([...realListRecords(), ...recs]);
-    auth.mode = "hang";
-    const s = await startApp((sess) => {
-      sess.syncLimits.loginCheckMs = 30;
-    });
+    auth.mode = "timeout";
+    const s = await startApp();
     await s.syncIdle();
     expect(s.getState().syncing).toBe(false);
     expect(mineOf(s, ids).map((r) => r.sync)).toEqual(["pending", "pending"]);
@@ -728,11 +729,9 @@ describe("아이폰: '로그인이 만료되었습니다(1건)' + '보내는 중
     const recs = today();
     const ids = recs.map((r) => r.id);
     seed([...realListRecords(), ...recs]);
-    auth.mode = "hangAfter";
-    auth.okCalls = 1; // 사전 확인만 통과
-    const s = await startApp((_sess, graph) => {
-      graph.graphTimeouts.tokenMs = 30;
-    });
+    auth.mode = "timeoutAfter";
+    auth.okCalls = 1;
+    const s = await startApp();
     await s.syncIdle();
     expect(s.getState().syncing).toBe(false);
     expect(mineOf(s, ids).map((r) => r.sync)).toEqual(["pending", "pending"]);
@@ -766,28 +765,6 @@ describe("아이폰: '로그인이 만료되었습니다(1건)' + '보내는 중
     expect(mineOf(s, ids).map((r) => r.sync)).toEqual(["synced", "synced"]);
     noDupList();
     expect(iljiDayRow("2026-11-12")).toMatchObject({ J: "350A", K: "2" });
-  });
-
-  it("요청·토큰 시간 제한이 없어도(무한 대기) 묶음 시간 제한이 요청을 끊어 '보내는 중'을 풀고 대기로 남긴다", async () => {
-    const recs = today();
-    const ids = recs.map((r) => r.id);
-    seed([...realListRecords(), ...recs]);
-    drive.hangs.push((_m, p) => p.includes("/workbook/createSession"));
-    const s = await startApp((sess, graph) => {
-      graph.graphTimeouts.requestMs = 0;
-      sess.syncLimits.runMs = 50;
-      sess.syncLimits.graceMs = 20;
-    });
-    await s.syncIdle();
-    expect(s.getState().syncing).toBe(false);
-    expect(mineOf(s, ids).every((r) => r.sync === "pending")).toBe(true);
-    expect(model(s).canRetry).toBe(true);
-
-    drive.hangs = [];
-    s.retrySync();
-    await s.syncIdle();
-    expect(mineOf(s, ids).map((r) => r.sync)).toEqual(["synced", "synced"]);
-    noDupList();
   });
 
   it("상태 줄: 실제로 보내는 동안만 '동기화 중'. 지운 현장(보내지 않는 기록)·미저장·없음은 대기로 세지 않아 초록이 된다", async () => {

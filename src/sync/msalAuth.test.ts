@@ -238,11 +238,29 @@ describe("토큰: 조용히(캐시·refresh token) → 안 되면 바로 만료(
     expect(m.getAuthState()).toBe("ok");
   });
 
-  it("acquireTokenSilent 가 응답 없이 멈추면 시간 제한 뒤 TimeoutError: 만료도 아니고 '로그인됨'도 아니다. 다음 호출은 정상", async () => {
-    fake.accounts = [acct("woo")];
-    fake.silent = ["HANG", "at-2"];
+  it("MSAL 네트워크 요청이 응답 없이 멈추면 그 fetch 를 실제로 abort 하고 timed_out 으로 끝낸다(진행 중 토큰 요청이 남아 다음 요청을 붙잡지 않게)", async () => {
     const m = await load();
-    m.authTimeouts.silentMs = 20;
+    await m.msalApp(CLIENT);
+    expect((fake.config as { system?: { networkClient?: unknown } }).system?.networkClient).toBe(m.msalNetwork);
+    const signals: AbortSignal[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ((_url: string, init: RequestInit) => {
+      signals.push(init.signal!);
+      return new Promise<Response>((_resolve, reject) => init.signal!.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
+    }) as typeof fetch;
+    m.authTimeouts.networkMs = 20;
+    const err = await m.msalNetwork.sendPostRequestAsync("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", { body: "grant_type=refresh_token" }).catch((e) => e);
+    m.authTimeouts.networkMs = 20_000;
+    globalThis.fetch = realFetch;
+    expect(signals[0].aborted).toBe(true);
+    expect(err).toBeInstanceOf(BrowserAuthError);
+    expect((err as BrowserAuthError).errorCode).toBe("timed_out");
+  });
+
+  it("조용한 토큰이 timed_out 으로 끝나면 TimeoutError: 만료도 아니고 '로그인됨'도 아니다. 다음 호출은 정상", async () => {
+    fake.accounts = [acct("woo")];
+    fake.silent = [new BrowserAuthError("timed_out"), "at-2"];
+    const m = await load();
     const err = await m.accessToken(CLIENT, { interactive: false }).catch((e) => e);
     expect(err).not.toBeInstanceOf(m.LoginRequiredError);
     expect((err as Error).name).toBe("TimeoutError");
@@ -250,7 +268,6 @@ describe("토큰: 조용히(캐시·refresh token) → 안 되면 바로 만료(
     expect(fns()).not.toContain("ssoSilent");
     expect(await m.accessToken(CLIENT, { interactive: false, forceRefresh: true })).toBe("at-2");
     expect(cacheCleared()).toBe(false);
-    m.authTimeouts.silentMs = 20_000;
   });
 
   it("사용자가 누른 동작(interactive)만 redirect(loginRedirect + login_hint) 로 다시 로그인, 계정 선택 화면 없음, 팝업 없음", async () => {
@@ -266,7 +283,6 @@ describe("토큰: 조용히(캐시·refresh token) → 안 되면 바로 만료(
 
   it.each([
     ["network_error", new BrowserAuthError("network_error")],
-    ["timed_out", new BrowserAuthError("timed_out")],
     ["post_request_failed", new BrowserAuthError("post_request_failed")],
     ["no_network_connectivity", new BrowserAuthError("no_network_connectivity")],
     ["서버 오류", new Error("503 Service Unavailable")],

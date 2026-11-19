@@ -33,7 +33,7 @@ import { backendEnabled } from "../sync/backend";
 import { accessToken, completeRedirect, currentAccount, LOGIN_NEEDED_TEXT, loginRedirect, logoutRedirect, resolveClientId } from "../sync/msal";
 import { downloadItem, GRAPH_LOGIN_TEXT, GRAPH_TIMEOUT_TEXT, GraphClient } from "../sync/graph";
 import { getAuthState, isLoginError, isLoginFailureText as authLoginText, onAuthChange, type AuthState } from "../sync/authState";
-import { ABORTED_TEXT, isTimeoutLike, TOKEN_TIMEOUT_TEXT, withTimeout } from "../sync/timeout";
+import { ABORTED_TEXT, isTimeoutLike, TOKEN_TIMEOUT_TEXT } from "../sync/timeout";
 import { listBookOf, parseListWorkbook, rerouteGmRecords } from "../excel/listBook";
 import { unzipXlsx } from "../excel/ooxml";
 import { kvGet, kvSet } from "./db";
@@ -442,25 +442,11 @@ async function persistConfig(): Promise<void> {
 let syncing = false;
 let syncAgain: SyncOptions | null = null;
 let currentRun: Promise<void> = Promise.resolve();
-/** 동기화 묶음 번호. 시간 초과로 놓아 준 묶음이 늦게 끝나도 새 묶음 결과를 덮지 않게 한다. */
-let runGen = 0;
 /** 다음 동기화의 첫 토큰은 캐시 없이 새로 받는다(로그인 직후·로그인 끊김·401 뒤). */
 let freshTokenNext = false;
 
-/** 동기화 한 묶음의 시간 제한(ms). 넘으면 Graph 요청을 끊고, 그래도 안 끝나면 grace 뒤 '보내는 중'을 풀어 준다. */
-export const syncLimits = {
-  runMs: 5 * 60_000,
-  graceMs: 5_000,
-  loginCheckMs: 70_000,
-};
-
 interface RunCtl {
-  gen: number;
   client: GraphClient | null;
-  /** 시간 초과로 끊었다 */
-  cancelled: boolean;
-  /** 시간 초과로 놓아 줬다(결과는 버린다) */
-  released: boolean;
 }
 
 /** 로그인이 끊겨(또는 새 토큰으로도 401) 못 보낸 단계 문구. 실패가 아니라 '로그인 대기'. */
@@ -537,60 +523,20 @@ export function requestSync(options: SyncOptions = {}): void {
   }
   syncing = true;
   patch({ syncing: true });
-  const ctl: RunCtl = { gen: ++runGen, client: null, cancelled: false, released: false };
+  const ctl: RunCtl = { client: null };
   activeCtl = ctl;
-  let abortTimer: ReturnType<typeof setTimeout> | undefined;
-  let releaseTimer: ReturnType<typeof setTimeout> | undefined;
-  // 시간 초과: 먼저 Graph 요청·토큰 기다림을 끊어 정상적으로 끝나게 하고(끝난 파일은 그대로),
-  // 그래도 안 끝나면(멈춘 토큰 요청 등) grace 뒤 놓아 준다. 어느 쪽이든 '보내는 중'은 반드시 풀린다.
-  const watchdog = new Promise<"released">((resolve) => {
-    abortTimer = setTimeout(() => {
-      ctl.cancelled = true;
-      ctl.client?.abort();
-      releaseTimer = setTimeout(() => resolve("released"), syncLimits.graceMs);
-    }, syncLimits.runMs);
-  });
-  const run = runSync(options, ctl).catch((error) => console.warn("동기화 오류", error));
-  currentRun = Promise.race([run.then(() => "done" as const), watchdog]).then((how) => {
-    clearTimeout(abortTimer);
-    clearTimeout(releaseTimer);
-    try {
-      if (how === "released") releaseStuckRun(ctl);
-      if (ctl.cancelled) toast(ABORTED_TEXT);
-    } catch (error) {
-      console.warn("동기화 정리 오류", error);
-    } finally {
-      // 끝남·시간 초과·중단 어느 경우든 '동기화 중'은 반드시 푼다(정리 중 오류가 나도).
-      if (ctl.gen === runGen) {
-        syncing = false;
-        activeCtl = null;
-        if (state.syncing) patch({ syncing: false });
+  currentRun = runSync(options, ctl)
+    .catch((error) => console.warn("동기화 오류", error))
+    .finally(() => {
+      syncing = false;
+      activeCtl = null;
+      if (state.syncing) patch({ syncing: false });
+      if (syncAgain) {
+        const next = syncAgain;
+        syncAgain = null;
+        requestSync(next);
       }
-    }
-    if (ctl.gen !== runGen) return;
-    if (syncAgain) {
-      const next = syncAgain;
-      syncAgain = null;
-      requestSync(next);
-    }
-  });
-}
-
-/** 끝나지 않는 묶음을 놓아 준다: '보내는 중' 기록을 대기로 되돌리고 저장한다. 늦게 끝난 결과는 버린다. */
-function releaseStuckRun(ctl: RunCtl): void {
-  ctl.released = true;
-  ctl.client?.abort();
-  let n = 0;
-  for (const rec of state.records) {
-    if (rec.sync !== "syncing") continue;
-    rec.sync = "pending";
-    rec.steps = deferSoftSteps(rec.steps);
-    n += 1;
-  }
-  if (n) {
-    patch({ records: [...state.records] });
-    void persistRecords();
-  }
+    });
 }
 
 /** 진행 중인 동기화가 끝날 때까지 기다린다(테스트용). */
@@ -776,14 +722,13 @@ async function commitDayNow(): Promise<void> {
 
 export { inspectorsOnDate };
 
-async function runSync(options: SyncOptions = {}, ctl: RunCtl = { gen: runGen, client: null, cancelled: false, released: false }): Promise<void> {
+async function runSync(options: SyncOptions, ctl: RunCtl): Promise<void> {
   const pending = jobs();
   const graph = state.config.syncMode === "graph";
   if (state.syncReport?.offline) patch({ syncReport: { ...state.syncReport, offline: false } });
   if (!pending.length && !(graph && options.backfill && hasAnyFile())) return;
   const clientId = graph ? resolveClientId(state.config.clientId) : "";
   if (graph && !(await loginReady(clientId))) return;
-  if (ctl.cancelled) return;
   for (const rec of pending) rec.sync = "syncing";
   patch({ records: [...state.records] });
   try {
@@ -814,7 +759,6 @@ async function runSync(options: SyncOptions = {}, ctl: RunCtl = { gen: runGen, c
       });
       // 새 토큰으로도 401 → 로그인이 실제로 끊긴 것. 실패가 아니라 '로그인 대기'.
       if (client.authFailed) loginLost = true;
-      if (ctl.released) return; // 시간 초과로 이미 놓아 준 묶음: 결과를 버린다(다음 묶음이 Y 앱 ID 로 다시 확인).
       deferSoftFailures(outcome);
       applyOutcome(pending, outcome);
       if (loginLost) {
@@ -850,7 +794,6 @@ async function runSync(options: SyncOptions = {}, ctl: RunCtl = { gen: runGen, c
     await kvSet(OWNERSHIP_KEY, statementOwnership());
     scheduleBookSave();
   } catch (error) {
-    if (ctl.released) return;
     const message = error instanceof Error ? error.message : "동기화에 실패했습니다.";
     // 로그인 끊김·시간 초과는 실패가 아니라 대기(다시 시도·로그인 뒤 그대로 보낸다).
     const soft = isLoginError(error) || isTimeoutLike(error) || isLoginFailureText(message) || isStallFailureText(message);
@@ -873,7 +816,7 @@ async function runSync(options: SyncOptions = {}, ctl: RunCtl = { gen: runGen, c
  */
 async function loginReady(clientId: string): Promise<boolean> {
   try {
-    await withTimeout(accessToken(clientId, { interactive: false }), syncLimits.loginCheckMs, TOKEN_TIMEOUT_TEXT);
+    await accessToken(clientId, { interactive: false });
   } catch (error) {
     if (isLoginError(error)) {
       freshTokenNext = true;
@@ -1015,7 +958,7 @@ async function doInit(): Promise<void> {
     const clientId = resolveClientId(savedConfig?.clientId ?? "");
     // 토큰 요청보다 먼저 Microsoft 응답 처리 + 캐시 계정 복원. 응답 처리 실패여도 캐시된 계정은 남는다.
     const redirected = clientId
-      ? await withTimeout(completeRedirect(clientId), 25_000, TOKEN_TIMEOUT_TEXT).catch((error) => {
+      ? await completeRedirect(clientId).catch((error) => {
           console.warn("MSAL 시작 실패", error);
           return null;
         })

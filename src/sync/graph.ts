@@ -1,6 +1,6 @@
 import type { ListWrite } from "../excel/listBook";
 import { isoToExcelSerial } from "../domain/dates";
-import { ABORTED_TEXT, TimeoutError, TOKEN_TIMEOUT_TEXT, withTimeout } from "./timeout";
+import { ABORTED_TEXT, TimeoutError, TOKEN_TIMEOUT_TEXT } from "./timeout";
 import { AUTH_EXPIRED_TEXT, getAuthState, isLoginError, markExpired, trackRequest } from "./authState";
 
 const GRAPH = "https://graph.microsoft.com/v1.0";
@@ -53,6 +53,13 @@ export function listRowFormulas(row: number, input: ListWrite, options: ListRowO
   return cols;
 }
 
+async function bufferedFetch(doFetch: typeof fetch, url: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
+  const res = await doFetch(url, { ...init, signal });
+  const nullBody = res.status === 204 || res.status === 205 || res.status === 304;
+  const body = nullBody ? null : await res.arrayBuffer();
+  return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
+}
+
 /** 설정 화면(파일 고르기)용 단순 요청. 이것도 전역 inflight 에 등록해 만료 때 끊기고, 시간 제한이 실제로 abort 한다. */
 async function graphFetch(url: string, token: string, init: RequestInit = {}, sessionId?: string, timeoutMs = graphTimeouts.transferMs): Promise<Response> {
   const headers = new Headers(init.headers);
@@ -65,9 +72,10 @@ async function graphFetch(url: string, token: string, init: RequestInit = {}, se
   const untrack = trackRequest(controller);
   const timer = setTimeout(() => controller.abort(new TimeoutError(GRAPH_TIMEOUT_TEXT)), timeoutMs);
   try {
-    return await withTimeout(fetch(url, { ...init, headers, signal: controller.signal }), timeoutMs, GRAPH_TIMEOUT_TEXT);
+    return await bufferedFetch(fetch, url, { ...init, headers }, controller.signal);
   } catch (error) {
     if (controller.signal.aborted && isLoginError(controller.signal.reason)) throw new GraphError(401, GRAPH_LOGIN_TEXT, "expired");
+    if (controller.signal.aborted) throw new TimeoutError(GRAPH_TIMEOUT_TEXT);
     throw error;
   } finally {
     clearTimeout(timer);
@@ -167,12 +175,11 @@ export function isTransientStatus(status: number): boolean {
   return status === 0 || status === 409 || status === 423 || status === 429 || status >= 500;
 }
 
-/** 요청·토큰 시간 제한(ms). 아이폰 홈 화면 앱에서 응답 없는 요청이 '보내는 중…'을 영원히 붙잡지 않게 한다. */
+/** 요청 하나(본문까지)의 시간 제한(ms). 넘으면 그 fetch 를 abort 한다. */
 export const graphTimeouts = {
   requestMs: 60_000,
   /** 파일 전체 받기·올리기 */
   transferMs: 180_000,
-  tokenMs: 25_000,
 };
 
 export const graphRetry = {
@@ -267,7 +274,7 @@ export class GraphClient {
     const fresh = force || this.forceNext;
     this.forceNext = false;
     try {
-      this.token = await this.guard(withTimeout(this.deps.getToken(fresh), graphTimeouts.tokenMs, TOKEN_TIMEOUT_TEXT));
+      this.token = await this.guard(this.deps.getToken(fresh));
     } catch (error) {
       if (isLoginError(error)) this.authFailed = true;
       if (error instanceof TimeoutError || this.aborted) {
@@ -284,40 +291,30 @@ export class GraphClient {
     return this.guard(new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
-  /** fetch 하나: 시간 제한 + abort() 로 끊을 수 있게. */
+  /** fetch 하나(본문까지): 시간 제한·만료·abort() 가 모두 같은 AbortController 로 끊는다. */
   private async timedFetch(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
     if (this.aborted) throw new GraphError(0, ABORTED_TEXT, "aborted");
     const doFetch = this.deps.fetchImpl ?? ((input: RequestInfo | URL, i?: RequestInit) => fetch(input, i));
     const controller = new AbortController();
     this.controllers.add(controller);
-    // 전역 등록: 토큰 만료(markExpired) 때 이 요청도 실제로 끊긴다.
     const untrack = trackRequest(controller);
     let timedOut = false;
-    const timer = timeoutMs > 0 ? setTimeout(() => {
+    const timer = setTimeout(() => {
       timedOut = true;
       controller.abort(new TimeoutError(GRAPH_TIMEOUT_TEXT));
-    }, timeoutMs) : null;
-    // fetch 가 signal 을 무시해도 만료 abort 는 바로 끝나게 한다.
-    const expired = new Promise<never>((_, reject) => {
-      controller.signal.addEventListener("abort", () => {
-        if (isLoginError(controller.signal.reason)) reject(controller.signal.reason);
-      });
-    });
-    expired.catch(() => undefined);
+    }, timeoutMs);
     try {
-      // fetch 가 signal 을 무시해도(일부 환경) 시간 제한·abort 는 지킨다.
-      const res = await this.guard(withTimeout(Promise.race([doFetch(url, { ...init, signal: controller.signal }), expired]), timeoutMs, GRAPH_TIMEOUT_TEXT));
-      return res;
+      return await bufferedFetch(doFetch, url, init, controller.signal);
     } catch (error) {
       if (isLoginError(error) || (controller.signal.aborted && isLoginError(controller.signal.reason))) {
         this.authFailed = true;
         throw new GraphError(401, GRAPH_LOGIN_TEXT, "expired");
       }
       if (this.aborted) throw new GraphError(0, ABORTED_TEXT, "aborted");
-      if (timedOut || error instanceof TimeoutError) throw new TimeoutError(GRAPH_TIMEOUT_TEXT);
+      if (timedOut) throw new TimeoutError(GRAPH_TIMEOUT_TEXT);
       throw error;
     } finally {
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
       this.controllers.delete(controller);
       untrack();
     }
@@ -407,7 +404,7 @@ export class GraphClient {
 
   async json<T>(url: string, init: RequestInit = {}, options: RequestOptions = {}): Promise<T> {
     const res = await this.request(url, init, options);
-    const text = await this.guard(withTimeout(res.text(), options.timeoutMs ?? graphTimeouts.requestMs, GRAPH_TIMEOUT_TEXT));
+    const text = await res.text();
     return (text ? JSON.parse(text) : {}) as T;
   }
 
@@ -429,7 +426,7 @@ export class GraphClient {
 
   async download(itemId: string): Promise<Uint8Array> {
     const res = await this.request(itemContentUrl(itemId), {}, { timeoutMs: graphTimeouts.transferMs });
-    return new Uint8Array(await this.guard(withTimeout(res.arrayBuffer(), graphTimeouts.transferMs, GRAPH_TIMEOUT_TEXT)));
+    return new Uint8Array(await res.arrayBuffer());
   }
 
   /**

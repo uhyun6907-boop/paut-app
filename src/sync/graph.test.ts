@@ -129,13 +129,13 @@ describe("Graph 요청 ↔ 전역 인증 상태", () => {
     auth.resetAuthForTests();
   });
 
-  it("진행 중 fetch 는 전역에 등록되고 끝나면 해제된다. 만료 abort 는 재시도하지 않는다(fetch 가 signal 을 무시해도)", async () => {
+  it("진행 중 fetch 는 전역에 등록되고 끝나면 해제된다. 만료 abort 는 재시도하지 않는다", async () => {
     const auth = await import("./authState");
     auth.resetAuthForTests();
     let calls = 0;
-    const fetchImpl = () => {
+    const fetchImpl = (_u: RequestInfo | URL, init?: RequestInit) => {
       calls += 1;
-      return new Promise<Response>(() => undefined); // signal 무시하고 영원히 멈춤
+      return new Promise<Response>((_resolve, reject) => init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason)));
     };
     const c = new GraphClient({ getToken: async () => "t", fetchImpl, sleep: async () => undefined });
     const p = c.request("https://graph.microsoft.com/v1.0/x").catch((e) => e);
@@ -156,7 +156,7 @@ describe("Graph 요청 ↔ 전역 인증 상태", () => {
     const signals: AbortSignal[] = [];
     const fetchImpl = (_u: RequestInfo | URL, init?: RequestInit) => {
       signals.push(init!.signal!);
-      return new Promise<Response>(() => undefined);
+      return new Promise<Response>((_resolve, reject) => init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason)));
     };
     const c = new GraphClient({ getToken: async () => "t", fetchImpl, sleep: async () => undefined });
     const old = graphTimeouts.requestMs;
@@ -172,12 +172,9 @@ describe("Graph 요청 ↔ 전역 인증 상태", () => {
   it("토큰이 시간 초과면 같은 클라이언트의 다른 요청도 끊는다(로그인 상태는 그대로)", async () => {
     const auth = await import("./authState");
     auth.resetAuthForTests();
-    const { graphTimeouts } = await import("./graph");
-    const old = graphTimeouts.tokenMs;
-    graphTimeouts.tokenMs = 20;
-    const c = new GraphClient({ getToken: () => new Promise<string>(() => undefined), fetchImpl: async () => new Response("{}"), sleep: async () => undefined });
+    const { TimeoutError, TOKEN_TIMEOUT_TEXT } = await import("./timeout");
+    const c = new GraphClient({ getToken: async () => { throw new TimeoutError(TOKEN_TIMEOUT_TEXT); }, fetchImpl: async () => new Response("{}"), sleep: async () => undefined });
     const err = await c.request("https://graph.microsoft.com/v1.0/x").catch((e) => e);
-    graphTimeouts.tokenMs = old;
     expect((err as Error).name).toBe("TimeoutError");
     expect(c.stalled).toBe(true);
     expect(c.isAborted).toBe(true);

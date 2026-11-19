@@ -8,6 +8,7 @@
  */
 
 import { AuthExpiredError, LoginRequiredError, markAuthOk, markExpired, markSignedOut } from "./authState";
+import { TimeoutError, TOKEN_TIMEOUT_TEXT } from "./timeout";
 
 const DEVICE_KEY = "paut-device-token";
 const EMAIL_KEY = "paut-device-email";
@@ -108,6 +109,8 @@ export async function backendLogout(): Promise<void> {
 let cached: { token: string; expiresAt: number } | null = null;
 let inflight: Promise<string> | null = null;
 
+const TOKEN_REQUEST_MS = 20_000;
+
 /** 서버에서 Graph access token 을 받는다. 만료 판정은 서버가 login_required/device_unknown 을 줄 때만. */
 export function backendToken(force = false): Promise<string> {
   if (!force && cached && cached.expiresAt - Date.now() > 2 * 60_000) return Promise.resolve(cached.token);
@@ -118,11 +121,23 @@ export function backendToken(force = false): Promise<string> {
       markSignedOut();
       throw new LoginRequiredError();
     }
-    const res = await fetch(`${backendUrl()}/api/token${force ? "?force=1" : ""}`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${device}` },
-    });
-    const body = (await res.json().catch(() => ({}))) as { access_token?: string; expires_at?: number; email?: string; error?: string; message?: string };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TOKEN_REQUEST_MS);
+    let res: Response;
+    let body: { access_token?: string; expires_at?: number; email?: string; error?: string; message?: string };
+    try {
+      res = await fetch(`${backendUrl()}/api/token${force ? "?force=1" : ""}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${device}` },
+        signal: controller.signal,
+      });
+      body = await res.json().catch(() => ({}));
+    } catch (error) {
+      if (controller.signal.aborted) throw new TimeoutError(TOKEN_TIMEOUT_TEXT);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
     if (res.status === 401 && (body.error === "login_required" || body.error === "device_unknown")) {
       cached = null;
       if (body.error === "device_unknown") {

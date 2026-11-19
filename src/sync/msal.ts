@@ -1,12 +1,16 @@
 import {
   BrowserAuthError,
+  BrowserAuthErrorCodes,
   CacheLookupPolicy,
   InteractionRequiredAuthError,
   PublicClientApplication,
   type AccountInfo,
   type Configuration,
+  type INetworkModule,
+  type NetworkRequestOptions,
+  type NetworkResponse,
 } from "@azure/msal-browser";
-import { TOKEN_TIMEOUT_TEXT, withTimeout } from "./timeout";
+import { TimeoutError, TOKEN_TIMEOUT_TEXT, withTimeout } from "./timeout";
 import {
   AuthExpiredError,
   getAuthState,
@@ -50,12 +54,39 @@ let appPromise: Promise<PublicClientApplication> | null = null;
 let pca: PublicClientApplication | null = null;
 let boundClientId = "";
 let redirectOnce: Promise<RedirectOutcome> | null = null;
-/** 토큰 단계별 시간 제한(ms). iOS 홈 화면 앱에서 응답 없는 요청·iframe 이 동기화를 영원히 붙잡지 않게 한다. */
 export const authTimeouts = {
-  redirectMs: 20_000,
-  silentMs: 20_000,
+  networkMs: 20_000,
   /** 앱을 켤 때(initAuth) 토큰 확인을 기다리는 최대 시간. 넘으면 화면을 먼저 띄우고 확인은 뒤에서 이어 간다. */
   probeMs: 8_000,
+};
+
+/**
+ * MSAL 의 기본 FetchClient 는 fetch 에 시간 제한이 없고, acquireTokenSilent 는 계정·범위가 같은 진행 중 요청을
+ * (forceRefresh 와 상관없이) 그대로 돌려준다. 응답 없는 토큰 요청 하나가 그 페이지의 모든 토큰 요청을 붙잡지 않도록
+ * 요청마다 실제로 abort 한다.
+ */
+function timedRequest(method: "GET" | "POST") {
+  return async <T>(url: string, options?: NetworkRequestOptions): Promise<NetworkResponse<T>> => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), authTimeouts.networkMs);
+    const failed = (code: string) => new BrowserAuthError(controller.signal.aborted ? BrowserAuthErrorCodes.timedOut : code);
+    try {
+      const res = await fetch(url, { method, headers: options?.headers, body: options?.body, signal: controller.signal }).catch(() => {
+        throw failed(!navigator.onLine ? BrowserAuthErrorCodes.noNetworkConnectivity : method === "GET" ? BrowserAuthErrorCodes.getRequestFailed : BrowserAuthErrorCodes.postRequestFailed);
+      });
+      const body = (await res.json().catch(() => {
+        throw failed(BrowserAuthErrorCodes.failedToParseResponse);
+      })) as T;
+      return { headers: Object.fromEntries(res.headers.entries()), body, status: res.status };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
+
+export const msalNetwork: INetworkModule = {
+  sendGetRequestAsync: timedRequest("GET"),
+  sendPostRequestAsync: timedRequest("POST"),
 };
 
 export function azureAuthority(): string {
@@ -109,6 +140,7 @@ export function msalConfig(clientId: string, uri: string): Configuration {
       temporaryCacheLocation: "localStorage",
       storeAuthStateInCookie: false,
     },
+    system: { networkClient: msalNetwork },
   };
 }
 
@@ -332,10 +364,7 @@ export async function accessToken(clientId: string, options: TokenOptions = {}):
   const interactive = options.interactive ?? true;
   if (backendEnabled()) return backendAccessToken(options, interactive);
   const app = await msalApp(clientId);
-  // 돌아온 응답 처리가 멈춰도(네트워크) 캐시된 계정으로 이어 간다.
-  await withTimeout(handleRedirectOnce(app), authTimeouts.redirectMs, TOKEN_TIMEOUT_TEXT).catch((error) => {
-    console.warn("handleRedirectPromise 시간 초과 → 캐시 계정으로 진행", error);
-  });
+  await handleRedirectOnce(app);
   const account = restoreAccount(app);
   if (!account) {
     markSignedOut();
@@ -346,20 +375,16 @@ export async function accessToken(clientId: string, options: TokenOptions = {}):
   const skipSilent = getAuthState() === "expired" && !options.allowWhenExpired;
   if (!skipSilent) {
     try {
-      const res = await withTimeout(
-        app.acquireTokenSilent({
-          account,
-          scopes: GRAPH_SCOPES,
-          forceRefresh: !!options.forceRefresh,
-          cacheLookupPolicy: CacheLookupPolicy.AccessTokenAndRefreshToken,
-        }),
-        authTimeouts.silentMs,
-        TOKEN_TIMEOUT_TEXT,
-      );
+      const res = await app.acquireTokenSilent({
+        account,
+        scopes: GRAPH_SCOPES,
+        forceRefresh: !!options.forceRefresh,
+        cacheLookupPolicy: CacheLookupPolicy.AccessTokenAndRefreshToken,
+      });
       markAuthOk();
       return res.accessToken;
     } catch (error) {
-      // 시간 초과·네트워크 오류는 로그인 문제가 아니다 → 그대로 던져 기록을 대기로 둔다.
+      if (codeOf(error) === BrowserAuthErrorCodes.timedOut) throw new TimeoutError(TOKEN_TIMEOUT_TEXT);
       if (!needsInteraction(error)) throw error;
       console.warn("조용한 토큰 실패 → 로그인 만료", error);
       markExpired();
@@ -391,7 +416,7 @@ export function initAuth(clientId: string): Promise<void> {
   if (!clientId) return Promise.resolve();
   if (!initPromise) {
     initPromise = (async () => {
-      const out = await withTimeout(completeRedirect(clientId), authTimeouts.redirectMs, TOKEN_TIMEOUT_TEXT).catch(() => null);
+      const out = await completeRedirect(clientId).catch(() => null);
       if (out && !out.account) {
         markSignedOut();
         return;
@@ -413,7 +438,7 @@ export function initAuth(clientId: string): Promise<void> {
 async function backendAccessToken(options: TokenOptions, interactive: boolean): Promise<string> {
   if (getAuthState() === "expired" && !options.allowWhenExpired && !interactive) throw new AuthExpiredError();
   try {
-    return await withTimeout(backendToken(!!options.forceRefresh), authTimeouts.silentMs, TOKEN_TIMEOUT_TEXT);
+    return await backendToken(!!options.forceRefresh);
   } catch (error) {
     if (!interactive || !(error instanceof LoginRequiredError)) throw error;
     backendLogin(backendEmail());
