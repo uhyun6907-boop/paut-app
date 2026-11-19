@@ -44,8 +44,6 @@ interface Item {
   name: string;
   files: ZipFiles;
   version: number;
-  /** .xls 처럼 zip 이 아닌 파일은 바이트 그대로 둔다. */
-  raw?: Uint8Array;
 }
 
 export class FakeDrive {
@@ -65,17 +63,6 @@ export class FakeDrive {
 
   put(id: string, name: string, bytes: Uint8Array): void {
     this.items.set(id, { name, files: unzipXlsx(bytes), version: 1 });
-  }
-
-  /** zip 이 아닌 파일(.xls)을 바이트 그대로 올린다. */
-  putRaw(id: string, name: string, bytes: Uint8Array): void {
-    this.items.set(id, { name, files: {}, version: 1, raw: bytes.slice() });
-  }
-
-  raw(id: string): Uint8Array {
-    const item = this.items.get(id);
-    if (!item?.raw) throw new Error(`no raw item ${id}`);
-    return item.raw;
   }
 
   /** 다른 곳(PC 엑셀)에서 파일이 바뀐 것처럼 버전만 올린다(eTag 가 달라짐). */
@@ -161,13 +148,12 @@ export class FakeDrive {
       return json({ id: itemId, name: item.name, eTag: etag(itemId, item.version) });
     }
     if (rest === "/content") {
-      if (method === "GET") return new Response(Uint8Array.from(item.raw ?? zipXlsx(item.files)), { status: 200 });
+      if (method === "GET") return new Response(Uint8Array.from(zipXlsx(item.files)), { status: 200 });
       if (method === "PUT") {
         const ifMatch = headers.get("If-Match");
         if (ifMatch && ifMatch !== etag(itemId, item.version)) return err(412, "resourceModified");
         const body = new Uint8Array(await new Response(init.body as BodyInit).arrayBuffer());
-        if (item.raw) item.raw = body;
-        else item.files = unzipXlsx(body);
+        item.files = unzipXlsx(body);
         item.version += 1;
         return json({ id: itemId, eTag: etag(itemId, item.version) });
       }

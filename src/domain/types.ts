@@ -55,8 +55,6 @@ export interface SyncReport {
   files: Record<SyncFile, { status: "ok" | "error" | "skip" | "idle"; message?: string; count?: number }>;
   /** 검사리스트 파일별 결과(이번에 다룬 파일만). files.list 는 두 리스트를 합친 결과. */
   lists?: Partial<Record<ListBookKind, { status: "ok" | "error" | "skip" | "idle"; message?: string; count?: number }>>;
-  /** 아전 거래명세서(.xls) 결과(이번에 다룬 경우만). 아전 기록의 단계는 files.statement 와 같은 'statement'. */
-  ajeon?: { status: "ok" | "error" | "skip" | "idle"; message?: string; count?: number };
 }
 
 /** 그날 작업일지에 쓸 검사자·근무시간. 저장할 때 날짜별로 남긴다. */

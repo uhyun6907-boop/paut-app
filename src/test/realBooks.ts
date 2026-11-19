@@ -1,5 +1,4 @@
 /** 테스트 전용: 실제 OneDrive 통합 문서의 복사본(src/excel/fixtures)과 가짜 드라이브 준비. */
-import { AJEON_STATEMENT_FILE } from "../excel/xls/ajeonStatement";
 import { readFileSync } from "node:fs";
 import { defaultMappings, defaultWeldLengths } from "../domain/mapping";
 import type { AppConfig, DayMeta, InspectionRecord } from "../domain/types";
@@ -18,9 +17,7 @@ export const LIST_GM_NAME = LIST_GM_FILE.name;
 
 const cache = new Map<string, Uint8Array>();
 
-export const AJEON_ID = AJEON_STATEMENT_FILE.id;
-
-export function fixture(name: "real-list.xlsx" | "real-worklog.xlsx" | "real-statement.xlsx" | "real-list-gunpo-majeon.xlsx" | "ajeon-real-sheets-2611.xls" | "ajeon-lo-styled.xls"): Uint8Array {
+export function fixture(name: "real-list.xlsx" | "real-worklog.xlsx" | "real-statement.xlsx" | "real-list-gunpo-majeon.xlsx"): Uint8Array {
   if (!cache.has(name)) cache.set(name, new Uint8Array(readFileSync(new URL(`../excel/fixtures/${name}`, import.meta.url))));
   return cache.get(name)!;
 }
@@ -36,8 +33,6 @@ export function realDrive(opts: { novSheet?: boolean } = {}): FakeDrive {
   drive.put(ILJI_ID, "PAUT 근무일지.xlsx", fixture("real-worklog.xlsx"));
   drive.put(STMT_ID, "02_PAUT 거래명세서 (지성, 드림).xlsx", fixture("real-statement.xlsx"));
   drive.put(LIST_GM_ID, LIST_GM_NAME, fixture("real-list-gunpo-majeon.xlsx"));
-  // 아전 거래명세서(.xls): 실제 파일의 시트 구성(아전 군포 2611 포함)을 담은 로컬 사본. 실제 OneDrive 파일은 아니다.
-  drive.putRaw(AJEON_ID, AJEON_STATEMENT_FILE.name, fixture("ajeon-real-sheets-2611.xls"));
   if (opts.novSheet !== false) userCreatesMonthSheet(drive.files(STMT_ID), "드림합정", 2026, 11);
   return drive;
 }

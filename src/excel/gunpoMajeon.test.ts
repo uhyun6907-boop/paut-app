@@ -10,7 +10,6 @@ import { GraphClient, graphRetry, listRowFormulas } from "../sync/graph";
 import { syncPanelModel } from "../store/syncStatus";
 import { FakeDrive } from "../test/fakeGraph";
 import {
-  AJEON_ID,
   ILJI_ID,
   LIST_GM_ID,
   LIST_GM_NAME,
@@ -230,9 +229,7 @@ describe("Graph 동기화: 네 번째 파일(군포·마전 리스트)", () => {
     expect(gmPatches).toHaveLength(8);
     expect(gmPatches.every((e) => !!e.session && /range\(address='A\d+:Y\d+'\)/.test(e.path))).toBe(true);
     expect(JSON.stringify(gmPatches.map((e) => e.body))).not.toContain("앱");
-    // 통째 업로드(PUT)는 없다. 아전 .xls 명세서는 이번 배포에서 받지도 올리지도 않는다.
     expect(drive.requests((e) => e.method === "PUT")).toHaveLength(0);
-    expect(drive.requests((e) => e.item === AJEON_ID)).toHaveLength(0);
     expect(gpBefore.byteLength).toBeGreaterThan(0);
 
     // 파일마다 새 토큰: 평택 리스트 세션을 닫은 뒤, 군포·마전 세션을 열기 전에 토큰을 다시 받는다.
@@ -265,9 +262,8 @@ describe("Graph 동기화: 네 번째 파일(군포·마전 리스트)", () => {
     expect(mjStep?.list?.status).toBe("done");
     expect(mjStep?.ilji?.status).toBe("done");
     expect(mjStep?.statement).toMatchObject({ status: "wait", message: "11월 거래명세서 시트를 만들어주세요 (지성 마전 26.11)" });
-    // 아전 군포: 명세서는 아직 쓰지 않는다(접두어 미확정 → 건너뜀). .xls 는 건드리지 않는다.
+    // 아전 군포: 명세서는 아직 쓰지 않는다(접두어 미확정 → 건너뜀).
     expect(out.steps.get(jobs[7].id)?.statement).toMatchObject({ status: "skip", message: statementSkipReason(graphConfig(), "아전 군포 PA") });
-    expect(out.report.ajeon).toBeUndefined();
     expect(out.report.files.statement.status).not.toBe("error");
   });
 

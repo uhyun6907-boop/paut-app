@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { latestLine } from "../domain/history";
-import { guessIljiColumn, defaultMappings, defaultWeldLengths, isRemovedSite, mappingFor } from "../domain/mapping";
-import { canonicalPoint, fmtPoint, mirrorPoint, parsePoint, planPrefixCopy } from "../domain/point";
+import { guessIljiColumn, defaultMappings, defaultWeldLengths, isRemovedSite } from "../domain/mapping";
+import { canonicalPoint, fmtPoint, mirrorPoint, parsePoint } from "../domain/point";
 import { normalizeResult } from "../excel/liveList";
 import { diameterFromLine } from "../domain/size";
 import { todayISO } from "../domain/dates";
@@ -461,7 +461,7 @@ function handleAuthChange(next: AuthState): void {
 onAuthChange(handleAuthChange);
 
 /** 응답이 없어(시간 초과·중단) 못 보낸 단계 문구. 실패가 아니라 대기. */
-export function isStallFailureText(message?: string): boolean {
+function isStallFailureText(message?: string): boolean {
   return !!message && (message.includes(GRAPH_TIMEOUT_TEXT) || message.includes(TOKEN_TIMEOUT_TEXT) || message.includes(ABORTED_TEXT));
 }
 
@@ -476,7 +476,7 @@ function mergeOptions(a: SyncOptions | null, b: SyncOptions): SyncOptions {
   return { backfill: !!(a?.backfill || b.backfill), scanList: !!(a?.scanList || b.scanList) };
 }
 
-export function requestSync(options: SyncOptions = {}): void {
+function requestSync(options: SyncOptions = {}): void {
   if (state.config.syncMode === "graph" && !state.online) {
     // 오프라인: 조용히 넘기지 않는다. 기록은 대기로 남고, 연결되면 bindOnline 이 다시 부른다.
     const waiting = jobs().length;
@@ -625,8 +625,6 @@ function staffChanged(meta: DayMeta): boolean {
 /**
  * '저장 · 미저장 N' 의 N: 지금 현장(지난 날 카드 포함)에서 사용자가 고쳤지만 아직 저장하지 않은 기록(sync "local")만 센다.
  * 회색(미입력) 카드는 세지 않는다 — 날짜가 없는 자리 표시라 저장해도 엑셀에 쓰지 않고 지워지지도 않는다.
- * (예전에는 현장의 모든 라인·날짜의 회색 카드를 더해, 지난날 + 로 만든 S29~S33 과 S→R 로 따라 만든 R29~R33 이
- * 아무것도 고치지 않은 다음 날에도 '미저장 10' 으로 계속 보였다.)
  */
 export function unsavedEdits(records: InspectionRecord[], meta: Pick<DayMeta, "lastSite">): number {
   return records.filter((rec) => rec.sync === "local" && rec.site === meta.lastSite).length;
@@ -1002,8 +1000,7 @@ let mutationChain: Promise<void> = Promise.resolve();
 
 /**
  * 기록을 바꾸는 작업은 모두 한 줄로 세운다. 앞 작업이 저장 중일 때 들어온 탭도
- * 끼어들지 않고 차례를 기다린다. (예전에는 "실행 중이면 바로 실행"이라
- * 빠르게 누른 S의 일부가 mirroring 중에 끼어들어 R을 건너뛰었다.)
+ * 끼어들지 않고 차례를 기다린다.
  * 큐 안의 작업은 공개 함수(enqueue 래퍼)를 다시 부르면 안 된다 → *Now 함수를 직접 부른다.
  */
 function enqueue<T>(task: () => Promise<T>): Promise<T> {
@@ -1115,8 +1112,7 @@ export function noteDirectR(point: string, date = state.meta.workDate, where?: {
 
 /**
  * 사용자가 결과를 직접 고친 R 이 지금도 있는가. 표시가 있어도 그 번호의 R 기록이 없으면(회색 카드뿐·지움·초기화)
- * 지킬 R 결과가 없으므로 S 를 따라간다. (예전: 'R 탭 +' 로 회색 R29~R31 을 만들기만 해도 표시가 남아
- * S29~S31 을 눌러도 R 이 영영 따라가지 않았다.)
+ * 지킬 R 결과가 없으므로 S 를 따라간다.
  */
 function directlyEdited(rPoint: string, scope: Scope): boolean {
   if (!samePoint(rPoint, scope).length) return false;
@@ -1328,7 +1324,6 @@ async function mirrorAbsent(sPoint: string, scope: Scope, removeIndex: number | 
 
 /**
  * 칠하기가 이미 합격(또는 불합격)인 S 위를 지나갔을 때: S 는 그대로 두고, 짝 R 기록이 없으면 같은 결과로 만든다.
- * (예전: 이미 합격인 S29~S31 위를 칠하면 아무것도 하지 않아, 빠진 R29~R31 이 끝내 생기지 않았다.)
  * 짝 R 이 이미 있으면 건드리지 않는다(결과가 달라도 — 엑셀·사용자가 정한 값).
  */
 export function ensurePairR(id: string): Promise<void> {
@@ -1404,72 +1399,6 @@ async function savePointNow(result: ResultKind, pointLabel: string): Promise<str
   if (parsed.prefix === "R") noteDirectR(point, rec.date, rec);
   if (parsed.prefix === "S") await mirrorResult(point, result, scopeOf(rec), ordinalOf(rec));
   return rec.id;
-}
-
-/** 용접이 없는 번호. 제안에만 쓰이고 개소·엑셀에는 넣지 않는다. */
-/** 선택한 날짜의 초안만 다른 접두어로 복사한다. 엑셀에는 저장 전까지 쓰지 않는다. */
-export async function copyDayPrefix(from: string, to: string): Promise<number> {
-  const site = state.meta.lastSite;
-  const line = state.meta.activeLine.trim();
-  const date = state.meta.workDate;
-  if (!site || !line) {
-    toast("라인을 선택하세요");
-    return 0;
-  }
-  const sameDay = state.records.filter((rec) => !rec.deleted && rec.site === site && rec.line === line && rec.date === date);
-  const destKey = `${site}||${line}||${to.toUpperCase()}`;
-  const grey = (state.meta.draftCards?.[destKey] ?? []).map((card) => card.point);
-  const planned = planPrefixCopy({
-    from,
-    to,
-    drafts: sameDay.filter((rec) => rec.sync === "local"),
-    existing: [...sameDay.map((rec) => rec.point), ...grey],
-  });
-  if (!planned.length) {
-    toast("복사할 초안이 없습니다");
-    return 0;
-  }
-  const now = Date.now();
-  const sheetName = sheetNameFor(state.records, site) ?? site;
-  const added: InspectionRecord[] = planned.map((row, index) => ({
-    id: crypto.randomUUID(),
-    site,
-    sheetName,
-    date,
-    line,
-    point: row.point,
-    result: row.result,
-    diameter: diameterFromLine(line) ?? "",
-    material: materialFor(site, line),
-    sch: "",
-    reportNo: "",
-    reportDate: "",
-    defectNo: "",
-    drawingNo: "",
-    weldNo: "",
-    rtSheets: "",
-    flawType: "",
-    flawLen: "",
-    note: "",
-    issued: "",
-    src: "user",
-    sync: "local",
-    ts: now + index,
-  }));
-  const draftCards = { ...(state.meta.draftCards ?? {}) };
-  const list = [...(draftCards[destKey] ?? [])];
-  for (const rec of added) {
-    if (rec.result !== FAIL) continue;
-    list.push({ id: crypto.randomUUID(), point: rec.point, reinspectOf: rec.id });
-  }
-  if (list.length) draftCards[destKey] = list;
-  state.records = [...state.records, ...added];
-  state.meta = { ...state.meta, draftCards, prefix: to.toUpperCase() };
-  patch({ records: state.records, meta: state.meta });
-  await persistRecords();
-  await persistMeta();
-  toast(`${from.toUpperCase()} → ${to.toUpperCase()} ${planned.length}개 복사`);
-  return planned.length;
 }
 
 export function saveAbsent(pointLabel: string): Promise<void> {
@@ -1941,10 +1870,6 @@ export function retryRecord(id: string): void {
   patch({ records: [...state.records] });
   void persistRecords();
   requestSync();
-}
-
-export function mappingNote(site: string): string {
-  return mappingFor(state.config.mappings, site).priceNote;
 }
 
 export function syncLabel(rec: InspectionRecord): string {
