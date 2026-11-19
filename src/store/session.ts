@@ -192,6 +192,10 @@ function wasSent(rec: InspectionRecord): boolean {
   return !!rec.excelRow || !!rec.steps || rec.src !== "user" || !!rec.movedFrom?.length;
 }
 
+function neverSent(rec: InspectionRecord): boolean {
+  return rec.sync === "local" && !wasSent(rec);
+}
+
 /** 지금 현장·작업일에 되돌릴 수 있는 미저장 카드 표시 수(초기화 버튼을 켤지). */
 export function resettableCount(records: InspectionRecord[], meta: DayMeta): number {
   const { lastSite, workDate } = meta;
@@ -696,13 +700,13 @@ function stampOf(meta: DayMeta): string {
 }
 
 /**
- * '저장 · 미저장 N' 의 N: 지금 현장·작업일에 사용자가 고쳤지만 아직 저장하지 않은 기록(sync "local")만 센다.
+ * '저장 · 미저장 N' 의 N: 지금 현장(지난 날 카드 포함)에서 사용자가 고쳤지만 아직 저장하지 않은 기록(sync "local")만 센다.
  * 회색(미입력) 카드는 세지 않는다 — 날짜가 없는 자리 표시라 저장해도 엑셀에 쓰지 않고 지워지지도 않는다.
  * (예전에는 현장의 모든 라인·날짜의 회색 카드를 더해, 지난날 + 로 만든 S29~S33 과 S→R 로 따라 만든 R29~R33 이
  * 아무것도 고치지 않은 다음 날에도 '미저장 10' 으로 계속 보였다.)
  */
-export function unsavedEdits(records: InspectionRecord[], meta: Pick<DayMeta, "lastSite" | "workDate">): number {
-  return records.filter((rec) => rec.sync === "local" && rec.site === meta.lastSite && rec.date === meta.workDate).length;
+export function unsavedEdits(records: InspectionRecord[], meta: Pick<DayMeta, "lastSite">): number {
+  return records.filter((rec) => rec.sync === "local" && rec.site === meta.lastSite).length;
 }
 
 export function unsavedCount(): number {
@@ -721,7 +725,7 @@ export function commitDay(): Promise<void> {
 }
 
 /**
- * 지난 날(작업일 이전)에 '미저장'으로 남은 기록. 화면은 오늘만 보여 저장 버튼으로는 다시 못 보내므로
+ * 지난 날(작업일 이전)에 '미저장'으로 남은 기록(저장하지 않고 앱을 닫았거나 다른 현장에서 고침).
  * 시작할 때 대기열에 넣는다(내용이 바뀐 기록이라 세 파일 모두 다시).
  */
 function promoteStaleLocals(records: InspectionRecord[], workDate: string): number {
@@ -732,7 +736,7 @@ function promoteStaleLocals(records: InspectionRecord[], workDate: string): numb
       rec.sync = "synced";
       continue;
     }
-    if (rec.deleted && !rec.excelRow) continue;
+    if (rec.deleted && neverSent(rec)) continue;
     rec.sync = "pending";
     rec.steps = undefined;
     rec.syncError = undefined;
@@ -743,21 +747,21 @@ function promoteStaleLocals(records: InspectionRecord[], workDate: string): numb
 
 async function commitDayNow(): Promise<void> {
   const { lastSite, workDate } = state.meta;
-  const day = state.records.filter((rec) => rec.site === lastSite && rec.date === workDate);
+  const toCommit = state.records.filter((rec) => rec.site === lastSite && (rec.date === workDate || rec.sync === "local"));
   const stampKey = `${lastSite}|${workDate}`;
   const saved = readUnsaved();
   const metaDirty = saved.stamps[stampKey] !== undefined && saved.stamps[stampKey] !== stampOf(state.meta);
-  const locals = day.filter((rec) => rec.sync === "local");
-  if (!locals.length && !metaDirty && !day.some((rec) => !rec.deleted && rec.result !== "없음")) {
+  const locals = toCommit.filter((rec) => rec.sync === "local");
+  if (!locals.length && !metaDirty && !toCommit.some((rec) => !rec.deleted && rec.result !== "없음")) {
     toast("저장할 내용이 없습니다");
     return;
   }
-  for (const rec of day) {
+  for (const rec of toCommit) {
     if (rec.result === "없음") {
       rec.sync = "synced";
       continue;
     }
-    if (rec.deleted && rec.sync === "local" && !rec.excelRow) continue;
+    if (rec.deleted && neverSent(rec)) continue;
     if (rec.sync === "local") {
       // 내용이 바뀌었으니 세 파일 모두 다시 쓴다(리스트는 Y 앱 ID 로 같은 행).
       rec.sync = "pending";
@@ -784,7 +788,7 @@ async function commitDayNow(): Promise<void> {
     },
   };
   void persistMeta();
-  state.records = state.records.filter((rec) => !(rec.deleted && rec.sync === "local" && !rec.excelRow));
+  state.records = state.records.filter((rec) => !(rec.deleted && neverSent(rec)));
   const places = state.records.filter((rec) => !rec.deleted && rec.site === lastSite && rec.date === workDate && rec.result === PASS).length;
   patch({ records: [...state.records] });
   await persistRecords();
@@ -1370,7 +1374,7 @@ async function mirrorRemove(sPoint: string, scope: Scope, index: number): Promis
   const existing = mirrorTarget(rPoint, scope, index);
   if (existing) {
     dropReinspectOf(existing.id);
-    if (existing.sync === "local" && !existing.excelRow) state.records = state.records.filter((rec) => rec.id !== existing.id);
+    if (neverSent(existing)) state.records = state.records.filter((rec) => rec.id !== existing.id);
     else {
       existing.deleted = true;
       existing.sync = existing.result === "없음" ? "synced" : "local";
@@ -1445,7 +1449,7 @@ async function mirrorAbsent(sPoint: string, scope: Scope, removeIndex: number | 
     const existing = mirrorTarget(rPoint, scope, removeIndex);
     if (existing && existing.result !== "없음") {
       dropReinspectOf(existing.id);
-      if (existing.sync === "local" && !existing.excelRow) state.records = state.records.filter((rec) => rec.id !== existing.id);
+      if (neverSent(existing)) state.records = state.records.filter((rec) => rec.id !== existing.id);
       else {
         existing.deleted = true;
         existing.sync = "local";
@@ -1738,8 +1742,7 @@ async function removeRecordNow(id: string, quiet = false): Promise<void> {
   const removedPoint = rec.point;
   const scope = scopeOf(rec);
   const index = ordinalOf(rec);
-  const neverSent = rec.sync === "local" && !rec.excelRow;
-  if (neverSent) state.records = state.records.filter((item) => item.id !== id);
+  if (neverSent(rec)) state.records = state.records.filter((item) => item.id !== id);
   else {
     rec.deleted = true;
     rec.sync = rec.result === "없음" ? "synced" : "local";

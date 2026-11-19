@@ -968,3 +968,94 @@ describe("로그인 만료(전역 인증 상태): 계정 이름이 보여도 토
 function SYNC_ERR(r: InspectionRecord): boolean {
   return r.sync === "error" || Object.values(r.steps ?? {}).some((st) => st?.status === "error");
 }
+
+describe("카드를 지우면 엑셀 세 파일에서 모두 빠진다", () => {
+  const STMT_SHEET = "드림합정26.11";
+  function stmtCount(date: string): number {
+    return readPautRows(drive.files(STMT_ID), STMT_SHEET).filter((r) => r.date === date).reduce((sum, r) => sum + r.count, 0);
+  }
+
+  it("1번 탭에 같이 보이는 지난 날(11/11) 카드를 지우면 미저장으로 세고, 저장하면 리스트 행·작업일지 개소·명세서 줄이 모두 빠진다", async () => {
+    const today = [rec("S28", PASS)];
+    seed([...realListRecords(), ...today]);
+    const s = await startApp();
+    expect(iljiDayRow("2026-11-11")).toMatchObject({ J: "350A", K: "7" });
+    expect(stmtCount("2026-11-11")).toBe(7);
+    const old = s.getState().records.find((r) => r.src === "user" && r.date === "2026-11-11" && r.point.startsWith("S"))!;
+    expect(listIds()).toContain(old.id);
+
+    await s.removeRecord(old.id);
+    expect(s.unsavedCount()).toBeGreaterThan(0);
+    await s.commitDay();
+    await s.syncIdle();
+
+    expect(listIds()).not.toContain(old.id);
+    const twinR = `R${old.point.slice(1)}`;
+    const left = s.getState().records.filter((r) => r.date === "2026-11-11" && r.src === "user" && !r.deleted && r.result === PASS).length;
+    expect(left).toBeLessThan(7);
+    expect(iljiDayRow("2026-11-11")).toMatchObject({ J: "350A", K: String(left) });
+    expect(stmtCount("2026-11-11")).toBe(left);
+    expect(s.getState().records.filter((r) => r.deleted)).toHaveLength(0);
+    expect(s.getState().records.some((r) => r.point === twinR && r.date === "2026-11-11" && r.sync !== "synced")).toBe(false);
+  });
+
+  it("날짜를 지난 날로 옮긴 카드를 지우고 저장하면 옮겨 간 날짜의 리스트 행·작업일지·명세서에서 빠진다", async () => {
+    const today = [rec("S28", PASS), rec("S29", PASS)];
+    seed([...realListRecords(), ...today]);
+    const s = await startApp();
+    await s.changeRecordDate(today[1].id, "2026-11-10");
+    await s.settled();
+    await s.syncIdle();
+    expect(iljiDayRow("2026-11-10")).toMatchObject({ J: "350A", K: "1" });
+    expect(stmtCount("2026-11-10")).toBe(1);
+
+    await s.removeRecord(today[1].id);
+    await s.commitDay();
+    await s.syncIdle();
+
+    expect(listIds()).not.toContain(today[1].id);
+    expect(iljiDayRow("2026-11-10")?.K ?? "").toBe("");
+    expect(stmtCount("2026-11-10")).toBe(0);
+    expect(iljiDayRow("2026-11-12")).toMatchObject({ J: "350A", K: "1" });
+  });
+
+  it("리스트만 실패하고 작업일지·명세서에 들어간 카드를 눌러 바꾼 뒤 지워도, 저장하면 작업일지·명세서에서 빠진다", async () => {
+    const today = [rec("S28", PASS), rec("S29", PASS)];
+    seed([...realListRecords(), ...today]);
+    drive.fail((m, p) => m === "PATCH" && p.includes(LIST_ID), 400, Infinity);
+    const s = await startApp();
+    drive.clearFaults();
+    const s29 = s.getState().records.find((r) => r.id === today[1].id)!;
+    expect(s29.steps?.list?.status).toBe("error");
+    expect(s29.steps?.ilji?.status).toBe("done");
+    expect(s29.excelRow).toBeUndefined();
+    expect(iljiDayRow("2026-11-12")).toMatchObject({ J: "350A", K: "2" });
+    expect(stmtCount("2026-11-12")).toBe(2);
+
+    await s.setResult(s29.id, FAIL);
+    await s.removeRecord(s29.id, true);
+    await s.commitDay();
+    await s.syncIdle();
+
+    expect(listIds()).not.toContain(s29.id);
+    expect(iljiDayRow("2026-11-12")).toMatchObject({ J: "350A", K: "1" });
+    expect(stmtCount("2026-11-12")).toBe(1);
+  });
+
+  it("저장하자마자(보내는 중) 지우고 다시 저장해도 리스트·작업일지·명세서에 남지 않는다", async () => {
+    seed([...realListRecords(), rec("S28", PASS)]);
+    const s = await startApp();
+    const id = await s.savePoint(PASS, "S29");
+    const first = s.commitDay();
+    await first;
+    await s.removeRecord(id!);
+    await s.commitDay();
+    await s.syncIdle();
+    await s.settled();
+    await s.syncIdle();
+
+    expect(listIds()).not.toContain(id);
+    expect(iljiDayRow("2026-11-12")).toMatchObject({ J: "350A", K: "1" });
+    expect(stmtCount("2026-11-12")).toBe(1);
+  });
+});

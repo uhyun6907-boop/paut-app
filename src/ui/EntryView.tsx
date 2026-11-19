@@ -159,7 +159,7 @@ export function EntryView() {
   const direction: WalkDirection = directionFromTrail(trail) ?? "up";
   const cards = useMemo(() => layoutCards(prefixRecords, drafts, "up"), [prefixRecords, drafts]);
   // 미저장 = 사용자가 고친 기록만(회색 미입력 카드는 저장해도 엑셀에 안 써서 세지 않는다).
-  const unsaved = useMemo(() => unsavedEdits(records, { lastSite: site, workDate: meta.workDate }), [records, site, meta.workDate]);
+  const unsaved = useMemo(() => unsavedEdits(records, { lastSite: site }), [records, site]);
   // 초기화: 마지막 저장 뒤 바꾼 카드 표시가 있을 때만 켠다.
   const resettable = useMemo(() => resettableCount(records, meta), [records, meta]);
   const historyRows = useMemo(() => historyOfLine(lineRecords, historySort, "up"), [lineRecords, historySort]);
