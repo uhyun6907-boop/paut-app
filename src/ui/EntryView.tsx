@@ -14,6 +14,7 @@ import {
   type WalkDirection,
 } from "../domain/point";
 import { isRemovedSite, mappingFor } from "../domain/mapping";
+import { monthDay, todayISO } from "../domain/dates";
 import { FAIL, PASS, type DraftCard, type InspectionRecord } from "../domain/types";
 import {
   addInspector,
@@ -30,7 +31,9 @@ import {
   getState,
   inspectorsOnDate,
   isSaved,
+  keepStaleWorkDate,
   markNoWeld,
+  moveStaleToToday,
   removeRecord,
   renamePoint,
   resetUnsaved,
@@ -344,6 +347,7 @@ export function EntryView() {
           <span className="meta-copy">
             <span className="k">날짜</span>
             <strong>{shortWeek(meta.workDate)} · {meta.dayType}</strong>
+            {meta.workDate !== todayISO() && <span className="not-today">오늘 아님 · {monthDay(meta.workDate)}</span>}
             <small>{crew}</small>
           </span>
           <span className="chev" aria-hidden="true">›</span>
@@ -489,7 +493,7 @@ export function EntryView() {
         >
           초기화
         </button>
-        <button className="save-main" type="button" disabled={unsaved === 0} onClick={() => void commitDay()}>
+        <button className="save-main" type="button" disabled={unsaved === 0} onClick={() => void commitDay((text) => window.confirm(text))}>
           {unsaved > 0 ? `저장 · 미저장 ${unsaved}` : "저장됨"}
         </button>
       </div>
@@ -513,6 +517,19 @@ export function EntryView() {
         >
           편집
         </button>
+      )}
+
+      {session.staleWorkDate && (
+        <div className="modal-backdrop show">
+          <div className="modal stale-date">
+            <h3>작업 날짜가 {shortWeek(session.staleWorkDate.workDate)}이에요. 오늘은 {shortWeek(session.staleWorkDate.today)}이에요.</h3>
+            <p>{monthDay(session.staleWorkDate.workDate)}에 저장 안 한 기록이 있어요.</p>
+            <div className="date-actions">
+              <button className="btn primary" type="button" onClick={() => void moveStaleToToday()}>오늘로 바꾸기</button>
+              <button className="btn" type="button" onClick={() => void keepStaleWorkDate()}>{monthDay(session.staleWorkDate.workDate)} 그대로</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {dateEdit && (

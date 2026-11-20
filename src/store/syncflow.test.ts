@@ -167,7 +167,13 @@ beforeEach(() => {
 
 afterEach(() => {
   drive.clearFaults();
+  vi.useRealTimers();
 });
+
+function onDay(y: number, m: number, d: number): void {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(y, m - 1, d, 10));
+}
 
 describe("앱 동기화 흐름", () => {
   it("리스트만 성공하고 작업일지가 잠겨 실패하면 화면에 '작업일지 · 실패'와 이유가 보이고, 다시 시도하면 중복 없이 끝난다", async () => {
@@ -397,6 +403,7 @@ describe("11/11 HJ-M-005-350A S28 이 리스트에 안 들어간 문제", () => 
   });
 
   it("검사자·근무시간만 바꿔도 미저장 1: 저장 때 남긴 그날 값(dayStaff)과 비교하고, 다시 켜도 그대로이며 저장하면 0", async () => {
+    onDay(2026, 11, 12);
     seed([...realListRecords(), rec("S28", PASS, { sync: "local" })]);
     let s = await startApp();
     await s.commitDay();
@@ -414,6 +421,7 @@ describe("11/11 HJ-M-005-350A S28 이 리스트에 안 들어간 문제", () => 
   });
 
   it("마지막 카드를 누르자마자 저장해도 그 카드가 저장(대기열)에 들어간다", async () => {
+    onDay(2026, 11, 11);
     seed(realListRecords(), { workDate: "2026-11-11" });
     const s = await startApp();
     const tap = s.savePoint(PASS, "S28");

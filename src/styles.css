@@ -312,6 +312,11 @@ details.meta-row { display: block; padding: 0; overflow: hidden; }
 .meta-row > summary::-webkit-details-marker { display: none; }
 .meta-row > summary::marker { content: ""; }
 .meta-copy { flex: 1; min-width: 0; }
+.not-today {
+  display: inline-block; margin-left: 6px; padding: 2px 8px; border-radius: 999px;
+  background: var(--red); color: #fff; font-size: 13px; font-weight: 800;
+}
+.stale-date h3 { line-height: 1.4; }
 .meta-row .k { display: block; font-size: 11px; line-height: 1.15; font-weight: 600; color: #8e8e93; }
 .meta-row strong {
   display: block; margin-top: 1px; font-size: 17px; font-weight: 800; letter-spacing: -0.03em;

@@ -119,6 +119,8 @@ export interface SiteBundle {
 
 export interface DayMeta {
   workDate: string;
+  /** 작업 날짜를 마지막으로 오늘과 맞춰 본 날. 이 날이 지나기 전에는 작업 날짜를 저절로 바꾸지 않는다. */
+  workDateCheckedOn?: string;
   dayType: "평일" | "공휴일";
   insp1: string;
   /** 빈 문자열이면 혼자 검사. 작업일지 둘째 칸은 비운다. */

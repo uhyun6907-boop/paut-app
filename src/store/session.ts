@@ -4,7 +4,7 @@ import { guessIljiColumn, defaultMappings, defaultWeldLengths, isRemovedSite } f
 import { canonicalPoint, fmtPoint, mirrorPoint, parsePoint } from "../domain/point";
 import { normalizeResult, recordPatch, type LiveTable } from "../excel/liveList";
 import { diameterFromLine } from "../domain/size";
-import { todayISO } from "../domain/dates";
+import { monthDay, todayISO } from "../domain/dates";
 import type { AppConfig, DayMeta, DayStaff, DraftCard, DriveFile, FileSteps, InspectionRecord, ListBookKind, ResultKind, SiteMapping, SyncFile, SyncReport } from "../domain/types";
 import { FAIL, PASS, SYNC_FILES, SYNC_FILE_LABEL } from "../domain/types";
 import {
@@ -69,6 +69,8 @@ export interface SessionState {
   /** 마지막 동기화의 파일별 결과. 앱을 다시 켜도 남는다. */
   syncReport: SyncReport | null;
   toast: Toast | null;
+  /** 새 날에 켰는데 지난 작업 날짜에 저장 안 한 기록이 있어 작업 날짜를 저절로 못 바꾼 상태. 1번 탭이 묻는다. */
+  staleWorkDate: { workDate: string; today: string } | null;
 }
 
 const emptyConfig = (): AppConfig => ({
@@ -107,6 +109,7 @@ let state: SessionState = {
   syncing: false,
   syncReport: null,
   toast: null,
+  staleWorkDate: null,
 };
 
 const listeners = new Set<() => void>();
@@ -658,7 +661,10 @@ export function unsavedCount(): number {
  * 저장 버튼. 카드 누르기·칠하기와 같은 편집 큐에 넣는다.
  * 마지막 카드(예: S28)를 누르자마자 저장해도, 그 카드 기록이 들어간 뒤에 저장한다.
  */
-export function commitDay(): Promise<void> {
+export function commitDay(confirm: (text: string) => boolean = () => true): Promise<void> {
+  const { workDate } = state.meta;
+  const today = todayISO();
+  if (workDate !== today && !confirm(`${monthDay(workDate)} 날짜로 저장할까요? 오늘은 ${monthDay(today)} 이에요.`)) return Promise.resolve();
   return enqueue(commitDayNow);
 }
 
@@ -1002,6 +1008,7 @@ async function doInit(): Promise<void> {
       syncReport: savedReport ?? null,
     });
     if (redirected?.error && !redirected.account) toast(redirected.error);
+    await checkWorkDate();
     // 다시 켜면: 대기·실패를 보내고, OneDrive 모드면 이미 리스트에 들어간 앱 기록 중 작업일지·명세서에 빠진 것도 채운다.
     if (config.syncMode === "graph") requestSync({ backfill: true });
     else if (jobs().length) requestSync();
@@ -1680,11 +1687,8 @@ async function changeRecordDateNow(id: string, date: string): Promise<void> {
     if (twin && twin.date === rec.date) moving.push(twin);
   }
   for (const item of moving) {
-    const from = item.date;
-    item.date = date;
+    redate(item, date);
     if (item.result === "없음") continue;
-    const sent = item.sync !== "local" || !!item.excelRow || !!item.steps;
-    if (sent) item.movedFrom = [...new Set([...(item.movedFrom ?? []), from])].filter((d) => d !== date);
     queueLocal(item);
     item.syncNote = undefined;
   }
@@ -1692,6 +1696,14 @@ async function changeRecordDateNow(id: string, date: string): Promise<void> {
   await persistRecords();
   toast(`${rec.point} 날짜 → ${date.slice(5).replace("-", "/")}`);
   requestSync();
+}
+
+function redate(item: InspectionRecord, date: string): void {
+  const from = item.date;
+  item.date = date;
+  if (item.result === "없음") return;
+  const sent = item.sync !== "local" || !!item.excelRow || !!item.steps;
+  if (sent) item.movedFrom = [...new Set([...(item.movedFrom ?? []), from])].filter((d) => d !== date);
 }
 
 /** 기존 합·불합격을 지우고, 그 본번호는 없음으로만 남긴다. 엑셀 행은 삭제된다. */
@@ -1768,6 +1780,54 @@ export async function updateMeta(partial: Partial<DayMeta>): Promise<void> {
   state.meta = next;
   patch({ meta: state.meta });
   await persistMeta();
+}
+
+function unsavedOn(date: string): InspectionRecord[] {
+  return state.records.filter((rec) => rec.sync === "local" && rec.date === date);
+}
+
+function rollTo(today: string): Promise<void> {
+  const staff = state.meta.dayStaff?.[today];
+  patch({ staleWorkDate: null });
+  return updateMeta({ ...(staff ?? { dayType: defaultDayType(today) }), workDate: today, workDateCheckedOn: today });
+}
+
+/**
+ * 앱을 켤 때와 화면으로 돌아올 때: 오늘 처음이면 작업 날짜를 오늘로 맞춘다.
+ * 지난 작업 날짜에 저장 안 한 기록이 있으면 바꾸지 않고 staleWorkDate 로 1번 탭에서 묻는다.
+ * 같은 날 사용자가 고른 지난 날짜는 다음 날이 될 때까지 그대로 둔다.
+ */
+export function checkWorkDate(): Promise<void> {
+  return enqueue(async () => {
+    const today = todayISO();
+    const { workDate, workDateCheckedOn } = state.meta;
+    if (workDateCheckedOn === today) return;
+    if (workDate === today) await updateMeta({ workDateCheckedOn: today });
+    else if (unsavedOn(workDate).length) patch({ staleWorkDate: { workDate, today } });
+    else await rollTo(today);
+  });
+}
+
+/** 「오늘로 바꾸기」: 지난 작업 날짜의 저장 안 한 기록만 오늘로 옮기고(저장은 하지 않음) 작업 날짜를 오늘로. */
+export function moveStaleToToday(): Promise<void> {
+  return enqueue(async () => {
+    const stale = state.staleWorkDate;
+    if (!stale) return;
+    for (const rec of unsavedOn(stale.workDate)) if (!rec.deleted) redate(rec, stale.today);
+    patch({ records: [...state.records] });
+    await persistRecords();
+    await rollTo(stale.today);
+  });
+}
+
+/** 「그대로」: 지난 작업 날짜를 오늘 하루 동안 그대로 쓴다. */
+export function keepStaleWorkDate(): Promise<void> {
+  return enqueue(async () => {
+    const stale = state.staleWorkDate;
+    if (!stale) return;
+    patch({ staleWorkDate: null });
+    await updateMeta({ workDateCheckedOn: stale.today });
+  });
 }
 
 export async function selectSite(site: string): Promise<void> {

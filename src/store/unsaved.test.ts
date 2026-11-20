@@ -182,6 +182,8 @@ describe("1번 탭 '미저장' 은 사용자가 고친 기록만", () => {
   });
 
   it("회색 카드를 + 로 더해도 미저장이 아니고, 실제로 카드를 누르면(사용자 편집) 그때만 미저장 1", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(2026, 10, 12, 10));
     seed(realListRecords(), { workDate: "2026-11-12", lastSite: SITE, activeLine: LINE, prefix: "S" });
     await startApp(); // 첫 실행: 기존 백필(11/11 작업일지·명세서)만 한 번
     drive.log.length = 0;

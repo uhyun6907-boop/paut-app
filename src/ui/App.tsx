@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { bindOnline, dismissToast, initSession, removeRecord, resetSamples, syncQueue, useSession } from "../store/session";
+import { bindOnline, checkWorkDate, dismissToast, initSession, removeRecord, resetSamples, syncQueue, useSession } from "../store/session";
 import { headerStatus } from "../store/syncStatus";
 import { ExcelScreen } from "./ExcelScreen";
 import { EntryView } from "./EntryView";
@@ -36,6 +36,20 @@ export function App() {
     void initSession();
     return bindOnline();
   }, []);
+
+  const loaded = session.ready && !session.error;
+  useEffect(() => {
+    if (!loaded) return;
+    const onShow = () => {
+      if (document.visibilityState === "visible") void checkWorkDate();
+    };
+    document.addEventListener("visibilitychange", onShow);
+    window.addEventListener("pageshow", onShow);
+    return () => {
+      document.removeEventListener("visibilitychange", onShow);
+      window.removeEventListener("pageshow", onShow);
+    };
+  }, [loaded]);
 
   useEffect(() => {
     const typing = (event: Event) => (event.target as HTMLElement | null)?.closest("input, textarea, select, [contenteditable='true']");

@@ -36,6 +36,10 @@ export function todayISO(d = new Date()): string {
   return `${y}-${m}-${day}`;
 }
 
+export function monthDay(iso: string): string {
+  return `${Number(iso.slice(5, 7))}/${Number(iso.slice(8, 10))}`;
+}
+
 export function parseFlexibleDate(raw: string | undefined): string {
   if (!raw) return "";
   const s = raw.trim();
