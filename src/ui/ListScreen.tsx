@@ -22,6 +22,7 @@ import {
   getState,
   graphReadOk,
   liveListClient,
+  pullFromList,
   rememberFile,
   repairSavedRecord,
   settled,
@@ -73,6 +74,7 @@ export async function readLiveList(
     if (res.ok) {
       graphReadOk();
       await rememberFile(res.table.book, { id: res.table.itemId, name: res.table.fileName });
+      await pullFromList(res.table, site);
       return res;
     }
     return { ok: false, message: isLoginFailureText(res.message) ? LIST_LOGIN_TEXT : res.message || "검사리스트를 읽지 못했습니다." };

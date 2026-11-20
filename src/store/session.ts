@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react";
 import { latestLine } from "../domain/history";
 import { guessIljiColumn, defaultMappings, defaultWeldLengths, isRemovedSite } from "../domain/mapping";
 import { canonicalPoint, fmtPoint, mirrorPoint, parsePoint } from "../domain/point";
-import { normalizeResult } from "../excel/liveList";
+import { normalizeResult, recordPatch, type LiveTable } from "../excel/liveList";
 import { diameterFromLine } from "../domain/size";
 import { todayISO } from "../domain/dates";
 import type { AppConfig, DayMeta, DraftCard, DriveFile, FileSteps, InspectionRecord, ListBookKind, ResultKind, SiteMapping, SyncFile, SyncReport } from "../domain/types";
@@ -2010,6 +2010,41 @@ export function applyListCellEdit(recordId: string, fields: Partial<InspectionRe
     const rec = { ...state.records[at], ...next };
     state.records[at] = rec;
     patch({ records: [...state.records] });
+    await persistRecords();
+  });
+}
+
+/**
+ * 리스트 탭이 엑셀에서 새로 읽은 표로, Y(앱 ID)가 같은 저장된 카드를 엑셀 값에 맞춘다(엑셀이 기준).
+ * 엑셀로 다시 보내지 않고 미저장으로 만들지 않는다. 빈 칸은 카드 값을 지우지 않는다.
+ * 아직 엑셀에 다 보내지 못한 카드(대기·보내는 중·실패)는 카드 쪽이 더 새 값이라 건드리지 않는다.
+ */
+export function pullFromList(table: LiveTable, site: string): Promise<void> {
+  return enqueue(async () => {
+    if (isRemovedSite(site)) return;
+    const rowsById = new Map<string, LiveTable["rows"]>();
+    for (const row of table.rows) {
+      const id = String(row.cells.find((c) => c.col === "Y")?.value ?? "").trim();
+      if (id) rowsById.set(id, [...(rowsById.get(id) ?? []), row]);
+    }
+    let changed = false;
+    const records = state.records.map((rec) => {
+      const rows = rowsById.get(rec.id);
+      if (rows?.length !== 1 || rec.deleted || rec.sync !== "synced" || isRemovedSite(rec.site)) return rec;
+      const diff: Partial<InspectionRecord> = {};
+      for (const cell of rows[0].cells) {
+        if (String(cell.value ?? "").trim() === "") continue;
+        for (const [field, value] of Object.entries(recordPatch(cell.col, cell.value) ?? {})) {
+          if (rec[field as keyof InspectionRecord] !== value) Object.assign(diff, { [field]: value });
+        }
+      }
+      if (!Object.keys(diff).length) return rec;
+      changed = true;
+      return { ...rec, ...diff };
+    });
+    if (!changed) return;
+    state.records = records;
+    patch({ records });
     await persistRecords();
   });
 }

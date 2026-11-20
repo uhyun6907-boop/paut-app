@@ -1305,3 +1305,124 @@ describe("OneDrive 가 파일을 다시 올려 저장된 항목 ID 가 404 일 �
     expect(rowsOn("2026-11-12", STMT_ID).map((r) => r.count)).toEqual([1]);
   });
 });
+
+describe("엑셀이 기준: 리스트 탭이 엑셀을 새로 읽으면 Y(앱 ID)가 같은 저장된 카드를 엑셀 값으로 맞춘다", () => {
+  const SITE = "드림 합정주공";
+  const S22 = "62980e41-3f0b-436e-9a5d-0be156928211";
+  const S23 = "6007fb64-0d7b-4cd8-833f-99e63acfee9f";
+  const S24 = "dd03d681-4ee7-4f9b-adc5-dbbe2b599554";
+  const S25 = "55788c21-188f-4c59-9b65-e3216659d9ee";
+
+  async function openTab3(s: Session, site = SITE): Promise<import("../excel/liveList").LiveTable> {
+    const ui = await import("../ui/ListScreen");
+    const res = await ui.readLiveList(site);
+    if (!res.ok) throw new Error(res.message);
+    await s.settled();
+    await s.syncIdle();
+    return res.table;
+  }
+
+  async function pcEdit(sheet: string, cells: Record<string, string | number>): Promise<void> {
+    const graph = await import("../sync/graph");
+    const c = new graph.GraphClient({ getToken: async () => drive.validToken, fetchImpl: drive.fetch, sleep: async () => undefined });
+    const sheetId = (await c.worksheetsOf(LIST_ID)).find((w) => w.name.trim() === sheet.trim())!.id;
+    for (const [address, value] of Object.entries(cells)) await c.patchValues(LIST_ID, sheetId, address, [[value]]);
+  }
+
+  const card = (s: Session, id: string) => s.getState().records.find((r) => r.id === id)!;
+  const writesSince = (n: number) => drive.log.slice(n).filter((e) => e.method !== "GET" && !/\/(create|close)Session$/.test(e.path));
+
+  it("PC 엑셀에서 합부·날짜·비고를 고치면 리스트 탭을 연 뒤 카드도 그 값. 엑셀로 다시 보내지 않고 미저장 0, 초기화해도 그대로", async () => {
+    seed(realListRecords());
+    const s = await startApp();
+    expect(card(s, S22)).toMatchObject({ result: PASS, date: "2026-11-11", note: "" });
+    await pcEdit(SITE, { P433: "불합격", E433: "2026-11-09", S433: "PC 메모" });
+    const logAt = drive.log.length;
+
+    await openTab3(s);
+
+    expect(card(s, S22)).toMatchObject({ result: FAIL, date: "2026-11-09", note: "PC 메모", sync: "synced" });
+    expect(card(s, S22).lastSaved).toBeUndefined();
+    expect(writesSince(logAt)).toEqual([]);
+    expect(s.unsavedCount()).toBe(0);
+    expect(s.syncQueue(s.getState().records)).toEqual([]);
+    expect(s.resettableCount(s.getState().records, s.getState().meta)).toBe(0);
+
+    await s.resetUnsaved();
+    expect(card(s, S22)).toMatchObject({ result: FAIL, date: "2026-11-09", note: "PC 메모" });
+
+    const again = await startApp();
+    expect(card(again, S22)).toMatchObject({ result: FAIL, date: "2026-11-09", note: "PC 메모", sync: "synced" });
+    expect(writesSince(logAt)).toEqual([]);
+  });
+
+  it("저장 안 한 카드와 아직 엑셀에 다 보내지 못한 카드는 Y 가 같아도 그대로", async () => {
+    const records = realListRecords();
+    const local = records.find((r) => r.id === S22)!;
+    const { lastSaved: _, ...saved } = structuredClone(local);
+    Object.assign(local, { sync: "local", result: FAIL, lastSaved: saved });
+    Object.assign(records.find((r) => r.id === S23)!, { sync: "pending", note: "앱에서 고침" });
+    seed(records);
+    await pcEdit(SITE, { P433: "합격", S433: "PC 메모", S434: "PC 메모" });
+    drive.fail((m, p) => m === "PATCH" && p.includes("LIST-ITEM"), 500, Infinity);
+    const s = await startApp();
+    expect(card(s, S23).sync).toBe("error");
+    const before = [JSON.stringify(card(s, S22)), JSON.stringify(card(s, S23))];
+
+    await openTab3(s);
+
+    expect([JSON.stringify(card(s, S22)), JSON.stringify(card(s, S23))]).toEqual(before);
+    expect(card(s, S22)).toMatchObject({ sync: "local", result: FAIL, note: "" });
+    expect(card(s, S23).note).toBe("앱에서 고침");
+  });
+
+  it("Y 가 없는 행(라인·포인트가 같아도)과 같은 Y 가 두 행에 있으면 건드리지 않는다", async () => {
+    seed(realListRecords());
+    const s = await startApp();
+    const snap = () => [S22, S23, S24].map((id) => JSON.stringify(card(s, id)));
+    const before = snap();
+    await pcEdit(SITE, { Y433: "", P433: "불합격", Y434: S24, P434: "불합격", P435: "불합격" });
+
+    await openTab3(s);
+
+    expect(snap()).toEqual(before);
+  });
+
+  it("앱에서 뺀 현장(지성 브레인)은 Y 가 같아도 건드리지 않는다", async () => {
+    seed(realListRecords());
+    const s = await startApp();
+    const id = "xlsx: 지성 브레인:6";
+    const before = JSON.stringify(card(s, id));
+    await pcEdit(" 지성 브레인", { Y6: id, P6: "불합격" });
+
+    await openTab3(s, "지성 브레인");
+
+    expect(JSON.stringify(card(s, id))).toBe(before);
+  });
+
+  it("순번·Y 만 남기고 지운 행, 빈 칸은 카드 값을 지우지 않는다(카드도 지우지 않는다)", async () => {
+    seed(realListRecords());
+    const s = await startApp();
+    const cleared = Object.fromEntries("BCDEFGHIJKLMNOPQRSTUVWX".split("").map((col) => [`${col}436`, ""]));
+    const before = JSON.stringify(card(s, S25));
+    await pcEdit(SITE, { ...cleared, Q433: "", P433: "불합격" });
+    const s22Before = card(s, S22);
+
+    await openTab3(s);
+
+    expect(JSON.stringify(card(s, S25))).toBe(before);
+    expect(card(s, S22)).toMatchObject({ ...s22Before, result: FAIL });
+  });
+
+  it("엑셀과 카드가 같으면 상태도 IndexedDB 도 바꾸지 않는다", async () => {
+    seed(realListRecords());
+    const s = await startApp();
+    const records = s.getState().records;
+    const stored = mem.get("records");
+
+    await openTab3(s);
+
+    expect(s.getState().records).toBe(records);
+    expect(mem.get("records")).toBe(stored);
+  });
+});
