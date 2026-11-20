@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react";
 import { latestLine } from "../domain/history";
 import { guessIljiColumn, defaultMappings, defaultWeldLengths, isRemovedSite } from "../domain/mapping";
 import { canonicalPoint, fmtPoint, mirrorPoint, parsePoint } from "../domain/point";
-import { normalizeResult, recordPatch, type LiveTable } from "../excel/liveList";
+import { excelRowPatch, normalizeResult, type LiveTable } from "../excel/liveList";
 import { diameterFromLine } from "../domain/size";
 import { monthDay, todayISO } from "../domain/dates";
 import type { AppConfig, DayMeta, DayStaff, DraftCard, DriveFile, FileSteps, InspectionRecord, ListBookKind, ResultKind, SiteMapping, SyncFile, SyncReport } from "../domain/types";
@@ -880,6 +880,10 @@ function hasAnyFile(): boolean {
 
 function applyOutcome(pending: InspectionRecord[], outcome: GraphSyncOutcome): void {
   const jobIds = new Set(pending.map((r) => r.id));
+  for (const { id, patch } of outcome.pulled) {
+    const rec = state.records.find((r) => r.id === id);
+    if (rec) Object.assign(rec, patch);
+  }
   if (outcome.discovered.length) {
     const known = new Set(state.records.map((r) => r.id));
     const fresh = outcome.discovered.filter((r) => !known.has(r.id)).map((r) => ({ ...r, sync: "synced" as const }));
@@ -2165,7 +2169,7 @@ export function adoptIljiDayStaff(date: string, row: StaffEdit & { dayType: stri
 /**
  * 리스트 탭이 엑셀에서 새로 읽은 표로, Y(앱 ID)가 같은 저장된 카드를 엑셀 값·행 번호(excelRow)에 맞춘다(엑셀이 기준).
  * 엑셀로 다시 보내지 않고 미저장으로 만들지 않는다. 빈 칸은 카드 값을 지우지 않는다.
- * 아직 엑셀에 다 보내지 못한 카드(대기·보내는 중·실패)는 카드 쪽이 더 새 값이라 건드리지 않는다.
+ * 대기·실패 카드도 맞춘다(날짜가 바뀌어도 movedFrom·단계 표시는 그대로). 미저장·보내는 중 카드는 건드리지 않는다.
  */
 export function pullFromList(table: LiveTable, site: string): Promise<void> {
   return enqueue(async () => {
@@ -2178,14 +2182,8 @@ export function pullFromList(table: LiveTable, site: string): Promise<void> {
     let changed = false;
     const records = state.records.map((rec) => {
       const rows = rowsById.get(rec.id);
-      if (rows?.length !== 1 || rec.deleted || rec.sync !== "synced" || isRemovedSite(rec.site)) return rec;
-      const diff: Partial<InspectionRecord> = {};
-      for (const cell of rows[0].cells) {
-        if (String(cell.value ?? "").trim() === "") continue;
-        for (const [field, value] of Object.entries(recordPatch(cell.col, cell.value) ?? {})) {
-          if (rec[field as keyof InspectionRecord] !== value) Object.assign(diff, { [field]: value });
-        }
-      }
+      if (rows?.length !== 1 || rec.deleted || rec.sync === "local" || rec.sync === "syncing" || isRemovedSite(rec.site)) return rec;
+      const diff = excelRowPatch(rec, rows[0].cells);
       if (rec.excelRow !== rows[0].row) diff.excelRow = rows[0].row;
       if (!Object.keys(diff).length) return rec;
       changed = true;

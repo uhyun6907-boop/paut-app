@@ -521,6 +521,31 @@ describe("네 번째 파일: PAUT NDT 리스트(군포, 마전).xlsx", () => {
   });
 });
 
+describe("리스트 E(날짜)가 카드 날짜보다 우선", () => {
+  it("IndexedDB 카드는 11/13, 리스트 E 는 11/12: 앱을 켜면 카드·저장된 기록을 11/12 로 맞추고 작업일지·명세서·리스트에 아무것도 쓰지 않는다", async () => {
+    const today = [rec("S28", PASS), rec("R28", PASS), rec("S29", PASS)];
+    seed([...realListRecords(), ...today], {
+      dayStaff: { "2026-11-12": { dayType: "평일", insp1: "조우현", insp2: "심명보", timeStart: "09:00", timeEnd: "15:30" } },
+    });
+    await startApp();
+    const ids = new Set(today.map((r) => r.id));
+    const stored = mem.get("records") as InspectionRecord[];
+    for (const r of stored.filter((x) => ids.has(x.id))) Object.assign(r, { date: "2026-11-13", sync: "synced", steps: { list: { status: "done", at: 1 } } });
+    mem.set("records", stored);
+    expect(iljiDayRow("2026-11-13")).toBeNull();
+    const logAt = drive.log.length;
+
+    const s = await startApp();
+
+    const writes = drive.log.slice(logAt).filter((e) => e.method !== "GET" && !/\/(create|close)Session$/.test(e.path));
+    expect(writes).toEqual([]);
+    expect(iljiDayRow("2026-11-13")).toBeNull();
+    const dates = (recs: InspectionRecord[]) => recs.filter((r) => ids.has(r.id)).map((r) => [r.date, r.movedFrom]);
+    expect(dates(s.getState().records)).toEqual(today.map(() => ["2026-11-12", undefined]));
+    expect(dates(mem.get("records") as InspectionRecord[])).toEqual(today.map(() => ["2026-11-12", undefined]));
+  });
+});
+
 describe("카드 길게 눌러 날짜 고치기", () => {
   const LINE = "HJ-M-005-350A";
   /** 리스트에서 그 라인의 앱 행(Y 앱 ID)을 행 순서대로: 날짜|포인트 */
@@ -1364,7 +1389,7 @@ describe("엑셀이 기준: 리스트 탭이 엑셀을 새로 읽으면 Y(앱 ID
     expect(writesSince(logAt)).toEqual([]);
   });
 
-  it("저장 안 한 카드와 아직 엑셀에 다 보내지 못한 카드는 Y 가 같아도 그대로", async () => {
+  it("저장 안 한 카드는 Y 가 같아도 그대로. 엑셀에 다 보내지 못한 카드(실패)는 엑셀 값으로 맞추고 상태·단계는 그대로", async () => {
     const records = realListRecords();
     const local = records.find((r) => r.id === S22)!;
     const { lastSaved: _, ...saved } = structuredClone(local);
@@ -1375,13 +1400,16 @@ describe("엑셀이 기준: 리스트 탭이 엑셀을 새로 읽으면 Y(앱 ID
     drive.fail((m, p) => m === "PATCH" && p.includes("LIST-ITEM"), 500, Infinity);
     const s = await startApp();
     expect(card(s, S23).sync).toBe("error");
-    const before = [JSON.stringify(card(s, S22)), JSON.stringify(card(s, S23))];
+    const before = JSON.stringify(card(s, S22));
+    const s23Steps = structuredClone(card(s, S23).steps);
 
     await openTab3(s);
 
-    expect([JSON.stringify(card(s, S22)), JSON.stringify(card(s, S23))]).toEqual(before);
+    expect(JSON.stringify(card(s, S22))).toEqual(before);
     expect(card(s, S22)).toMatchObject({ sync: "local", result: FAIL, note: "" });
-    expect(card(s, S23).note).toBe("앱에서 고침");
+    expect(card(s, S23)).toMatchObject({ sync: "error", note: "PC 메모" });
+    expect(card(s, S23).steps).toEqual(s23Steps);
+    expect(card(s, S23).movedFrom).toBeUndefined();
   });
 
   it("Y 가 없는 행(라인·포인트가 같아도)과 같은 Y 가 두 행에 있으면 건드리지 않는다", async () => {

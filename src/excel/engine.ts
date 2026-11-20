@@ -8,7 +8,8 @@ import { appIdRows, LIST_LAYOUT, listBookOf, listDiameterValue, listSheetOf, ord
 import { dropCalcChain, moveRowCells, readSheet, setXml, shiftRowNumbers, unzipXlsx, workbookSheets, xmlText, zipXlsx, type ZipFiles } from "./ooxml";
 import { expectedMonthSheetName, readLengths, readPautRows, writePautLines, type PautLine, type SheetOwnership } from "./statementBook";
 import { diffSheet, toRangeWrites } from "./cellDiff";
-import { GraphError, listRowFormulas, type GraphClient, type WorkbookSession } from "../sync/graph";
+import { GraphError, listRowFormulas, type GraphCell, type GraphClient, type WorkbookSession } from "../sync/graph";
+import { excelRowPatch } from "./liveList";
 import { copyRowFormat } from "../sync/rowFormat";
 
 /** 이 기기에 사본을 두는 통합 문서. 검사리스트는 두 파일(평택 list, 군포·마전 listGm). */
@@ -367,6 +368,13 @@ export interface GraphSyncOutcome {
   discovered: InspectionRecord[];
   /** 저장된 ID 가 404 라 이름으로 다시 찾은 파일. 설정에 남겨야 한다. */
   files: Map<BookKind, DriveFile>;
+  /** 리스트 행(Y)에서 읽어 카드에 맞춘 값(엑셀이 기준). 엑셀에 다시 쓰지 않는다. */
+  pulled: ExcelPull[];
+}
+
+export interface ExcelPull {
+  id: string;
+  patch: Partial<InspectionRecord>;
 }
 
 function needs(rec: InspectionRecord, file: SyncFile): boolean {
@@ -477,13 +485,15 @@ export async function syncGraph(args: GraphSyncArgs): Promise<GraphSyncOutcome> 
     all = [...all, ...discovered];
   }
 
-  const candidates = args.backfill ? backfillCandidates(all, jobs) : [];
+  const hold = listChecked?.hold ?? new Set<string>();
+  const writable = jobs.filter((r) => !hold.has(r.id));
+  const candidates = args.backfill ? backfillCandidates(all, jobs).filter((r) => !hold.has(r.id)) : [];
   // 후보는 이미 리스트에 있는 행(동기화됨 또는 리스트에서 읽은 Y 앱 ID). 리스트 단계는 끝난 것으로 둔다.
   // Y열 앱 ID 로 확인한 것만 리스트 완료로 표시한다(확인 못 했으면 표시하지 않음).
   if (listChecked) run.mark(candidates.filter((r) => !r.steps?.list && listChecked.present.has(r.id)), "list", "done");
-  await iljiStep(args, run, jobs, candidates, all);
-  await statementStep(args, run, jobs, candidates, all);
-  return { steps: run.steps, excelRows: run.excelRows, report: run.report, discovered, files: run.files };
+  await iljiStep(args, run, writable, candidates, all);
+  await statementStep(args, run, writable, candidates, all);
+  return { steps: run.steps, excelRows: run.excelRows, report: run.report, discovered, files: run.files, pulled: listChecked?.pulled ?? [] };
 }
 
 /**
@@ -520,6 +530,9 @@ interface ListCheck {
   present: Set<string>;
   /** 보낸 것으로 표시됐지만 Y열에 없어 이번에 다시 쓴 기록 */
   missing: InspectionRecord[];
+  pulled: ExcelPull[];
+  /** 리스트 행 날짜가 카드 날짜와 달랐던 기록. 이번 동기화에서는 작업일지·명세서에 쓰지 않는다. */
+  hold: Set<string>;
 }
 
 /**
@@ -532,16 +545,20 @@ interface ListCheck {
 async function listStep(args: GraphSyncArgs, run: Run, jobs: InspectionRecord[], verify: InspectionRecord[] = []): Promise<ListCheck | null> {
   const recs = jobs.filter((r) => needs(r, "list"));
   if (!recs.length && !verify.length) return null;
+  const listDoneJobs = jobs.filter((r) => r.src === "user" && !r.deleted && !needs(r, "list") && !verify.includes(r));
+  const align = verify.length ? [...verify, ...listDoneJobs] : [];
   let check: ListCheck | null = null;
   for (const book of LIST_BOOKS) {
     const bookRecs = recs.filter((r) => listBookOf(r) === book);
     const bookVerify = verify.filter((r) => listBookOf(r) === book);
     if (!bookRecs.length && !bookVerify.length) continue;
-    const res = await listBookStep(args, run, book, jobs, bookRecs, bookVerify);
+    const res = await listBookStep(args, run, book, jobs, bookRecs, bookVerify, align.filter((r) => listBookOf(r) === book));
     if (!res) continue;
-    check ??= { present: new Set(), missing: [] };
+    check ??= { present: new Set(), missing: [], pulled: [], hold: new Set() };
     for (const id of res.present) check.present.add(id);
     check.missing.push(...res.missing);
+    check.pulled.push(...res.pulled);
+    for (const id of res.hold) check.hold.add(id);
   }
   return check;
 }
@@ -553,6 +570,7 @@ async function listBookStep(
   jobs: InspectionRecord[],
   recs: InspectionRecord[],
   verify: InspectionRecord[],
+  align: InspectionRecord[],
 ): Promise<ListCheck | null> {
   const file = run.file(book);
   if (!file?.id) {
@@ -560,7 +578,7 @@ async function listBookStep(
     return null;
   }
   const layout = LIST_LAYOUT[book];
-  const check: ListCheck = { present: new Set(), missing: [] };
+  const check: ListCheck = { present: new Set(), missing: [], pulled: [], hold: new Set() };
   const remaining = new Set(recs);
   let wb: WorkbookSession | null = null;
   let written = 0;
@@ -581,6 +599,12 @@ async function listBookStep(
     for (const rec of verify) {
       const key = listSheetOf(rec);
       verifyBySheet.set(key, [...(verifyBySheet.get(key) ?? []), rec]);
+      if (!bySheet.has(key)) bySheet.set(key, []);
+    }
+    const alignBySheet = new Map<string, InspectionRecord[]>();
+    for (const rec of align) {
+      const key = listSheetOf(rec);
+      alignBySheet.set(key, [...(alignBySheet.get(key) ?? []), rec]);
       if (!bySheet.has(key)) bySheet.set(key, []);
     }
     for (const [sheetName, group] of bySheet) {
@@ -617,11 +641,15 @@ async function listBookStep(
       });
       const lastBefore = last;
       const byId = new Map<string, number>();
+      const rowsById = new Map<string, number[]>();
       colY.forEach((row, i) => {
         const v = row?.[0];
-        if (typeof v === "string" && v.trim()) byId.set(v.trim(), 6 + i);
+        if (typeof v !== "string" || !v.trim()) return;
+        byId.set(v.trim(), 6 + i);
+        rowsById.set(v.trim(), [...(rowsById.get(v.trim()) ?? []), 6 + i]);
       });
       for (const id of byId.keys()) check.present.add(id);
+      await alignWithList(wb, ws.id, alignBySheet.get(sheetName) ?? [], rowsById, check);
       const plain = new Map<string, number[]>();
       colF.forEach((row, i) => {
         const y = colY[i]?.[0];
@@ -719,6 +747,34 @@ async function listBookStep(
     await wb?.close();
   }
   return check;
+}
+
+const LIST_FIELD_COLS = "BCDEFGHIJKLMNOPQRS".split("");
+
+/**
+ * 이미 보낸 앱 기록을 Y(앱 ID)가 한 행뿐인 리스트 행 값에 맞춘다(엑셀이 기준). movedFrom 은 남기지 않는다.
+ * 날짜가 엑셀과 달랐던 기록(Y 행이 여럿이면 하나라도 다르면)은 이번 동기화에서 작업일지·명세서에 쓰지 않는다.
+ */
+async function alignWithList(wb: WorkbookSession, sheetId: string, recs: InspectionRecord[], rowsById: Map<string, number[]>, check: ListCheck): Promise<void> {
+  const targets = recs.filter((rec) => rowsById.has(rec.id));
+  if (!targets.length) return;
+  const rows = targets.flatMap((rec) => rowsById.get(rec.id)!);
+  const lo = Math.min(...rows);
+  const hi = Math.max(...rows);
+  const values = await wb.readValues(sheetId, `${LIST_FIELD_COLS[0]}${lo}:${LIST_FIELD_COLS.at(-1)}${hi}`);
+  const cellsAt = (row: number) => LIST_FIELD_COLS.map((col, i): { col: string; value: GraphCell } => ({ col, value: values[row - lo]?.[i] ?? null }));
+  for (const rec of targets) {
+    const recRows = rowsById.get(rec.id)!;
+    if (recRows.length > 1) {
+      if (recRows.some((row) => excelRowPatch(rec, cellsAt(row)).date)) check.hold.add(rec.id);
+      continue;
+    }
+    const patch = excelRowPatch(rec, cellsAt(recRows[0]));
+    if (!Object.keys(patch).length) continue;
+    if (patch.date) check.hold.add(rec.id);
+    Object.assign(rec, patch);
+    check.pulled.push({ id: rec.id, patch });
+  }
 }
 
 /** 리스트 행의 같은 검사 키(날짜 일련번호|라인|포인트). 셋 중 하나라도 비면 null. */

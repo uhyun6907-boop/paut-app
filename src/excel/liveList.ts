@@ -379,6 +379,18 @@ export function normalizeResult(text: string): string {
   return text.trim();
 }
 
+/** 엑셀 행 값 중 카드와 다른 필드(엑셀이 기준). 빈 칸은 카드 값을 지우지 않는다. */
+export function excelRowPatch(rec: InspectionRecord, cells: { col: string; value: GraphCell }[]): Partial<InspectionRecord> {
+  const diff: Partial<InspectionRecord> = {};
+  for (const cell of cells) {
+    if (String(cell.value ?? "").trim() === "") continue;
+    for (const [field, value] of Object.entries(recordPatch(cell.col, cell.value) ?? {})) {
+      if (rec[field as keyof InspectionRecord] !== value) Object.assign(diff, { [field]: value });
+    }
+  }
+  return diff;
+}
+
 /** 고친 칸을 앱 기록 필드 값으로. 필드가 없는 열이면 null. */
 export function recordPatch(col: string, value: GraphCell): Partial<InspectionRecord> | null {
   const field = FIELD_OF[col];
