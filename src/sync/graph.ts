@@ -550,6 +550,12 @@ export class GraphClient {
 
 export type GraphCell = string | number | null;
 
+export interface RangeBlock {
+  values: GraphCell[][];
+  formulasR1C1: GraphCell[][];
+  valueTypes: string[][];
+}
+
 export interface BatchRequest {
   method: "GET" | "PATCH" | "POST";
   url: string;
@@ -598,6 +604,16 @@ export class WorkbookSession {
       { sessionId: this.id },
     );
     return json.values || [];
+  }
+
+  /** 범위의 값·R1C1 수식(행을 옮겨도 같은 뜻)·값 종류. */
+  async readBlock(sheetId: string, address: string): Promise<RangeBlock> {
+    const json = await this.client.json<Partial<RangeBlock>>(
+      worksheetRangeUrl(this.itemId, sheetId, address) + "?$select=values,formulasR1C1,valueTypes",
+      {},
+      { sessionId: this.id },
+    );
+    return { values: json.values ?? [], formulasR1C1: json.formulasR1C1 ?? [], valueTypes: json.valueTypes ?? [] };
   }
 
   /** formulas 의 null 칸은 바꾸지 않는다. '=' 로 시작하면 수식. */

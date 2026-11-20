@@ -75,30 +75,6 @@ function parseBox(address: string): { r1: number; c1: number; r2: number; c2: nu
   return { r1: Number(pa[2]), c1: columnIndex(pa[1]), r2: Number(pb[2]), c2: columnIndex(pb[1]) };
 }
 
-/** A열 순번 숫자. 비었거나 숫자가 아니면 null. */
-function seqOf(row: LiveRow): number | null {
-  const v = row.cells.find((c) => c.col === "A")?.value;
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  const t = typeof v === "string" ? v.trim() : "";
-  return /^-?\d+(\.\d+)?$/.test(t) ? Number(t) : null;
-}
-
-/**
- * 화면 순서: 엑셀 A열 순번 그대로(물리 행·날짜 순 아님). 순번이 없거나 숫자가 아닌 행은 뒤에, 시트 행 순서대로.
- * 엑셀 값·행은 건드리지 않고 보여 주는 순서만 바꾼다.
- */
-export function sortBySeq(rows: LiveRow[]): LiveRow[] {
-  return rows
-    .map((row) => ({ row, seq: seqOf(row) }))
-    .sort((a, b) => {
-      if (a.seq !== null && b.seq !== null && a.seq !== b.seq) return a.seq - b.seq;
-      if (a.seq === null && b.seq !== null) return 1;
-      if (a.seq !== null && b.seq === null) return -1;
-      return a.row.row - b.row.row;
-    })
-    .map((x) => x.row);
-}
-
 /** 칸 값을 화면 글자로. 날짜 칸의 일련번호는 2026-11-12 로. */
 export function cellText(cell: Pick<LiveCell, "col" | "value">): string {
   const v = cell.value;
@@ -128,7 +104,7 @@ export function toCellValue(col: string, text: string, previous: GraphCell): Gra
   return t;
 }
 
-function same(a: GraphCell | undefined, b: GraphCell | undefined): boolean {
+export function same(a: GraphCell | undefined, b: GraphCell | undefined): boolean {
   const norm = (x: GraphCell | undefined) => (x === null || x === undefined ? "" : String(x));
   return norm(a) === norm(b);
 }
@@ -173,18 +149,21 @@ export async function loadLiveList(client: GraphClient, config: AppConfig, site:
     header.push({ col, title });
   }
   for (let r = LIVE_FIRST_DATA_ROW; r <= lastRow; r++) {
-    const cells: LiveCell[] = [];
-    let any = false;
-    for (let c = 1; c <= LIVE_LAST_COL; c++) {
-      const col = columnLetter(c);
-      const value = at(values, r, c);
-      const f = at(formulas, r, c);
-      if (value !== "" && value !== null) any = true;
-      cells.push({ address: `${col}${r}`, col, row: r, value, formula: typeof f === "string" && f.startsWith("=") });
-    }
-    if (any) rows.push({ row: r, cells });
+    const row = liveRow(r, values[r - 1] ?? [], formulas[r - 1] ?? []);
+    if (row.cells.some((c) => c.value !== "" && c.value !== null)) rows.push(row);
   }
-  return { ok: true, table: { book, itemId, fileName: meta.name, sheetId: sheet.id, sheetName: sheet.name, eTag: meta.eTag, header, rows: sortBySeq(rows) } };
+  return { ok: true, table: { book, itemId, fileName: meta.name, sheetId: sheet.id, sheetName: sheet.name, eTag: meta.eTag, header, rows } };
+}
+
+/** 시트 r 행의 A–Y. formulas 는 A1 이든 R1C1 이든 '=' 로 시작하면 수식 칸. */
+export function liveRow(r: number, values: GraphCell[], formulas: GraphCell[]): LiveRow {
+  const cells: LiveCell[] = [];
+  for (let c = 1; c <= LIVE_LAST_COL; c++) {
+    const col = columnLetter(c);
+    const f = formulas[c - 1];
+    cells.push({ address: `${col}${r}`, col, row: r, value: values[c - 1] ?? "", formula: typeof f === "string" && f.startsWith("=") });
+  }
+  return { row: r, cells };
 }
 
 /**
@@ -229,8 +208,8 @@ async function mapLimit<T>(items: T[], limit: number, run: (item: T) => Promise<
 
 export class LiveConflictError extends Error {
   current: GraphCell;
-  constructor(current: GraphCell) {
-    super(`다른 곳(PC 엑셀 등)에서 이 칸이 이미 바뀌었습니다(지금 값: ${current === "" || current == null ? "빈 칸" : String(current)}). 새로 불러온 뒤 다시 고치세요.`);
+  constructor(current: GraphCell, address?: string) {
+    super(`다른 곳(PC 엑셀 등)에서 ${address ? `${address} 칸이` : "이 칸이"} 이미 바뀌었습니다(지금 값: ${current === "" || current == null ? "빈 칸" : String(current)}). 새로 불러온 뒤 다시 고치세요.`);
     this.name = "LiveConflictError";
     this.current = current;
   }
@@ -355,7 +334,7 @@ const FIELD_OF: Record<string, keyof InspectionRecord> = {
 };
 
 /**
- * 엑셀 행과 같은 앱 기록: Y(앱 ID) → 엑셀에서 읽은 행 ID(xlsx:시트:행) → 같은 파일·시트·행 번호이면서 라인·포인트가 같은 기록.
+ * 엑셀 행과 같은 앱 기록: Y(앱 ID) → 엑셀에서 읽은 행 ID(xlsx:시트:행, 행 순서를 바꾼 기록은 excelRow 가 그 행일 때만) → 같은 파일·시트·행 번호이면서 라인·포인트가 같은 기록.
  */
 export function matchRecord(records: InspectionRecord[], table: Pick<LiveTable, "book" | "sheetName">, row: LiveRow): InspectionRecord | null {
   const text = (col: string) => {
@@ -368,7 +347,9 @@ export function matchRecord(records: InspectionRecord[], table: Pick<LiveTable, 
     const hit = alive.find((r) => r.id === appId);
     if (hit) return hit;
   }
-  const xid = alive.find((r) => r.id === `xlsx:${table.sheetName}:${row.row}` || r.id === `xlsx:${table.sheetName.trim()}:${row.row}`);
+  const xid = alive.find(
+    (r) => (r.id === `xlsx:${table.sheetName}:${row.row}` || r.id === `xlsx:${table.sheetName.trim()}:${row.row}`) && (r.excelRow === undefined || r.excelRow === row.row),
+  );
   if (xid) return xid;
   const line = text("F").toUpperCase();
   const point = pointKey(text("G"));

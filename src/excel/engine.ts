@@ -5,7 +5,7 @@ import { FAIL, LIST_BOOKS, LIST_BOOK_LABEL, LIST_GM_FILE, PASS, SYNC_FILE_LABEL 
 import { findMonthSheet, isRemovedSite, mappingFor, REMOVED_SITE_MAPPINGS } from "../domain/mapping";
 import { readDayStaff, readInspectors, readWorkLog, applyIljiDay, findIljiSheet, readIljiDay, type IljiGroup, type WorkLogDay } from "./iljiBook";
 import { appIdRows, LIST_LAYOUT, listBookOf, listDiameterValue, listSheetOf, orderForAppend, parseListWorkbook, planLineReorder, styleAppendedRow, writeListRow, type ListWrite } from "./listBook";
-import { dropCalcChain, readSheet, shiftRowNumbers, unzipXlsx, workbookSheets, zipXlsx, type ZipFiles } from "./ooxml";
+import { dropCalcChain, moveRowCells, readSheet, setXml, shiftRowNumbers, unzipXlsx, workbookSheets, xmlText, zipXlsx, type ZipFiles } from "./ooxml";
 import { expectedMonthSheetName, readLengths, readPautRows, writePautLines, type PautLine, type SheetOwnership } from "./statementBook";
 import { diffSheet, toRangeWrites } from "./cellDiff";
 import { GraphError, listRowFormulas, type GraphClient, type WorkbookSession } from "../sync/graph";
@@ -751,6 +751,20 @@ function mirrorListLocally(rec: InspectionRecord, row: number, appended: boolean
     if (appended) styleAppendedRow(files, sheet.name, row);
   } catch {
     /* 미리보기 사본 */
+  }
+}
+
+/** 세 번째 탭에서 옮긴 행을 미리보기 사본에도 같은 순서로(B–Y). 사본이 없거나 옮길 수 없으면 false. */
+export function mirrorRowMove(book: ListBookKind, sheetName: string, lo: number, sources: number[]): boolean {
+  const files = work[book];
+  const sheet = files && workbookSheets(files).find((x) => x.name.trim() === sheetName.trim());
+  if (!files || !sheet) return false;
+  try {
+    setXml(files, sheet.path, moveRowCells(xmlText(files, sheet.path), lo, sources, 2, 25));
+    return true;
+  } catch (error) {
+    console.warn(`미리보기 사본 '${sheetName}' 행 순서를 맞추지 못함`, error);
+    return false;
   }
 }
 

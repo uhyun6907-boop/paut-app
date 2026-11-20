@@ -31,7 +31,7 @@ import { KEY_COLS, MODE_LABEL, shortLine, summarizeByDate, toggleDate, toggleEdi
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { matchRecord } from "../excel/liveList";
-import { DateSummaryCard, applyRowAction, deleteConfirmText, moveDateGroup, moveDateConfirmText } from "./ListScreen";
+import { DateSummaryCard, applyRowAction, deleteConfirmText, moveDateGroup, moveDateConfirmText, type CellEdit } from "./ListScreen";
 import { applyListCellEdits } from "../store/session";
 import { recordPatch, writeLiveCell as writeCell } from "../excel/liveList";
 
@@ -285,6 +285,8 @@ describe("리스트 휴대폰 카드 보기 · 주요 열 / 모든 열", () => {
     const order = table.header.map((h) => h.col);
     expect(all.map((c) => c.col)).toEqual([...all.map((c) => c.col)].sort((a, b) => order.indexOf(a) - order.indexOf(b)));
     expect(MODE_LABEL).toEqual({ key: "주요 열", all: "모든 열" });
+    expect(all.map((c) => c.col)).toEqual("ABCDEFGHIJKLMNOPQRS".split(""));
+    expect(Object.fromEntries(all.map((c) => [c.col, c.title]))).toMatchObject({ B: "성적서 발행여부", H: "Defect No.", J: "용접 번호", Q: "결함의 종류", R: "결함의 길이" });
   });
 
   it("카드에서 주요 열(판정·포인트)을 고쳐도 그 칸 하나만 PATCH, 행 추가·'앱' 없음", async () => {
@@ -312,27 +314,33 @@ describe("리스트 검사 날짜 요약 · 누르면 펼침, 「수정」 전�
     if (!res.ok) throw new Error(res.message);
     return res.table;
   }
-  function render(group: DateGroup, focus: DateFocus, cols: { col: string; title: string }[], table: LiveTable): string {
+  function render(group: DateGroup, focus: DateFocus, cols: { col: string; title: string }[], table: LiveTable, edit: CellEdit | null = null): string {
     return renderToStaticMarkup(
       createElement(DateSummaryCard, {
         group,
         focus,
         cols,
         busy: false,
-        editing: null,
+        edit,
         recordOf: (row) => matchRecord(getState().records, table, row),
         staffOf: dayStaffOn,
         onDate: () => undefined,
         onEditing: () => undefined,
         onRow: () => undefined,
         onCell: () => undefined,
+        onEditText: () => undefined,
+        onSave: () => undefined,
+        onCancelEdit: () => undefined,
+        onMove: () => undefined,
         onAction: () => undefined,
         onMoveDate: () => undefined,
         onStaff: () => undefined,
       }),
     );
   }
-  const cellButtons = (html: string) => [...html.matchAll(/<button[^>]*class="lc-f[^"]*"[^>]*>/g)].map((m) => m[0]);
+  const cellButtons = (html: string) => [...html.matchAll(/<button[^>]*class="xg-cb"[^>]*>/g)].map((m) => m[0]);
+  const bodyRows = (html: string) => [...html.matchAll(/<tr><th scope="row" class="xg-rn[^"]*">(?:<button[^>]*>)?(\d+)/g)].map((m) => Number(m[1]));
+  const headers = (html: string) => [...html.matchAll(/<th scope="col" class="xg-h c-([A-Z])">([^<]*)<\/th>/g)].map((m) => [m[1], m[2]]);
 
   it("날짜마다 요약 하나: 행 수·합격/불합격 수·라인별 포인트 범위. 최근 날짜가 먼저, 날짜 없는 행은 맨 뒤", async () => {
     const table = await maJeon();
@@ -386,7 +394,7 @@ describe("리스트 검사 날짜 요약 · 누르면 펼침, 「수정」 전�
     expect(toggleEditing(null)).toBeNull();
   });
 
-  it("접힌 요약은 행을 그리지 않고, 펼치면 행이 한 줄씩(칸 버튼·삭제 없음). 「수정」 뒤 연 행만 칸과 리페어 처리·삭제", async () => {
+  it("접힌 요약은 표를 그리지 않고, 펼치면 그날 44행이 엑셀 같은 표(머리글·행 번호, 시트 행 순서). 「수정」 전에는 눌리는 칸·메뉴 없음", async () => {
     getState().records.splice(0, getState().records.length, ...realListRecords(), ...realGmRecords());
     const table = await maJeon();
     const group = summarizeByDate(table.rows).find((g) => g.date === "2026-06-18")!;
@@ -398,32 +406,67 @@ describe("리스트 검사 날짜 요약 · 누르면 펼침, 「수정」 전�
     expect(closed).toContain(`합격 ${group.pass}`);
     expect(closed).toContain("003 · S25~S40, R25~R40");
     expect(closed).toContain('aria-expanded="false"');
-    expect(closed).not.toContain("dr-row");
+    expect(closed).not.toContain("<table");
     expect(closed).not.toContain(">수정</button>");
 
     const open = render(group, { date: group.date, editing: false, row: null }, cols, table);
-    expect(open.match(/class="dr-row"/g)).toHaveLength(44);
-    expect(open).not.toMatch(/<button[^>]*class="dr-row"/);
+    expect(bodyRows(open)).toEqual(group.rows.map((r) => r.row));
+    expect(bodyRows(open)).toHaveLength(44);
+    expect(headers(open).map(([col]) => col)).toEqual(cols.map((c) => c.col));
     expect(open).toContain(">수정</button>");
+    expect(open).toContain("읽기 전용");
     expect(cellButtons(open)).toEqual([]);
+    expect(open).not.toContain("xg-rnb");
     expect(open).not.toContain("삭제");
     expect(open).not.toContain("리페어 처리");
+    expect(open).not.toContain("그날 한꺼번에");
+    const first = group.rows[0];
+    expect(open).toContain(`>${first.row}</th><td class="c-A num">${cellText(first.cells[0])}</td>`);
+    expect(open).toContain(">26.06.18</td>");
+    expect(open).toMatch(/<td class="c-P v-ok">합격<\/td>/);
 
     const target = group.rows.find((r) => matchRecord(getState().records, table, r))!;
     const editing = render(group, { date: group.date, editing: true, row: null }, cols, table);
     expect(editing).toContain(">완료</button>");
-    expect(editing.match(/<button[^>]*class="dr-row"/g)).toHaveLength(44);
-    expect(cellButtons(editing)).toEqual([]);
+    expect(editing.match(/class="xg-rnb"/g)).toHaveLength(44);
+    expect(cellButtons(editing).some((b) => b.includes(`aria-label="${cols.find((c) => c.col === "P")!.title} P${target.row}"`))).toBe(true);
+    expect(cellButtons(editing).some((b) => / Y\d+"/.test(b))).toBe(false);
+    expect(editing).not.toContain('role="menu"');
 
     const rowOpen = render(group, { date: group.date, editing: true, row: target.row }, cols, table);
-    const enabled = cellButtons(rowOpen).filter((b) => !b.includes("disabled"));
-    expect(enabled.some((b) => b.includes(`aria-label="${cols.find((c) => c.col === "P")!.title} P${target.row}"`))).toBe(true);
-    expect(enabled.some((b) => / Y\d+"/.test(b))).toBe(false);
+    expect(rowOpen.match(/role="menu"/g)).toHaveLength(1);
     expect(rowOpen.match(/>삭제<\/button>/g)).toHaveLength(1);
     expect(rowOpen.match(/>리페어 처리<\/button>/g)).toHaveLength(1);
+    expect(rowOpen).toContain(">위로</button>");
+    expect(rowOpen).toContain(">아래로</button>");
 
     const otherDay = summarizeByDate(table.rows).find((g) => g.date === "2026-06-10")!;
-    expect(render(otherDay, { date: group.date, editing: true, row: target.row }, cols, table)).not.toContain("dr-row");
+    expect(render(otherDay, { date: group.date, editing: true, row: target.row }, cols, table)).not.toContain("<table");
+
+    const key = visibleColumns(table.header, "key");
+    expect(headers(render(group, { date: group.date, editing: false, row: null }, key, table)).map(([col]) => col)).toEqual(["E", "F", "G", "P", "S"]);
+  });
+
+  it("「수정」 중 칸을 누르면 그 칸에 붙은 작은 편집 창(날짜 칸은 날짜 입력). 저장은 그 칸 하나만 PATCH 하고 카드도 고친다", async () => {
+    getState().records.splice(0, getState().records.length, ...realListRecords(), ...realGmRecords());
+    const table = await maJeon();
+    const group = summarizeByDate(table.rows).find((g) => g.date === "2026-06-18")!;
+    const cols = visibleColumns(table.header, "key");
+    const row = group.rows[3];
+    const e = row.cells.find((c) => c.col === "E")!;
+    const html = render(group, { date: group.date, editing: true, row: null }, cols, table, { cell: e, text: cellText(e) });
+    expect(html.match(/class="xg-pop"/g)).toHaveLength(1);
+    expect(html).toMatch(new RegExp(`<td class="c-E ed on"><button[^>]*aria-label="[^"]* E${row.row}"[^>]*>26\\.06\\.18</button><div class="xg-pop" role="dialog" aria-label="E${row.row} 고치기"><input[^>]*type="date"[^>]*value="2026-06-18"`));
+    const p = row.cells.find((c) => c.col === "P")!;
+    expect(render(group, { date: group.date, editing: true, row: null }, cols, table, { cell: p, text: "불합격" })).toMatch(/<input[^>]*type="text"[^>]*value="불합격"/);
+
+    const rec = matchRecord(getState().records, table, structuredClone(row))!;
+    drive.log.length = 0;
+    const written = await writeCell(client(), table, p, "불합격");
+    await applyListCellEdits([{ id: rec.id, fields: recordPatch("P", written)! }]);
+    expect(writes()).toHaveLength(1);
+    expect(writes()[0].path).toContain(`range(address='P${row.row}')`);
+    expect(getState().records.find((r) => r.id === rec.id)!.result).toBe("불합격");
   });
 
   it("「삭제」는 확인을 받아야만 지운다. 취소하면 앱 기록·엑셀 대기 모두 그대로", async () => {
@@ -460,20 +503,24 @@ describe("리스트 「수정」 · 검사 날짜 바꾸기(행 하나·그날 �
   function seed(): void {
     getState().records.splice(0, getState().records.length, ...realListRecords(), ...realGmRecords());
   }
-  function render(group: DateGroup, focus: DateFocus, table: LiveTable): string {
+  function render(group: DateGroup, focus: DateFocus, table: LiveTable, edit: CellEdit | null = null): string {
     return renderToStaticMarkup(
       createElement(DateSummaryCard, {
         group,
         focus,
         cols: visibleColumns(table.header, "key"),
         busy: false,
-        editing: null,
+        edit,
         recordOf: (row) => matchRecord(getState().records, table, row),
         staffOf: dayStaffOn,
         onDate: () => undefined,
         onEditing: () => undefined,
         onRow: () => undefined,
         onCell: () => undefined,
+        onEditText: () => undefined,
+        onSave: () => undefined,
+        onCancelEdit: () => undefined,
+        onMove: () => undefined,
         onAction: () => undefined,
         onMoveDate: () => undefined,
         onStaff: () => undefined,
@@ -554,7 +601,7 @@ describe("리스트 「수정」 · 검사 날짜 바꾸기(행 하나·그날 �
     expect(rec.date).toBe(OLD);
   });
 
-  it("「수정」 전에는 그날 날짜·검사자·검사시간 칸이 없고, 「수정」 뒤에만 보인다. 연 행에는 그날 검사자·검사시간", async () => {
+  it("「수정」 전에는 그날 날짜·검사자·검사시간 칸이 없고, 「수정」 뒤에만 접힌 「그날 한꺼번에」 한 줄(그날 검사자·검사시간)로 보인다", async () => {
     seed();
     getState().meta.dayStaff = { [OLD]: { dayType: "평일", insp1: "조우현", insp2: "심명보", timeStart: "10:00", timeEnd: "21:30" } };
     const table = await maJeon();
@@ -575,10 +622,10 @@ describe("리스트 「수정」 · 검사 날짜 바꾸기(행 하나·그날 �
     expect(editing).toMatch(/type="time"[^>]*value="10:00"/);
     expect(editing).toMatch(/type="time"[^>]*value="21:30"/);
 
-    const rowOpen = render(group, { date: OLD, editing: true, row: group.rows[0].row }, table);
-    expect(rowOpen).toContain("조우현 · 심명보 · 10:00–21:30");
-    expect(rowOpen).toMatch(/<button[^>]*aria-label="[^"]* E\d+"[^>]*>/);
-    expect(rowOpen).not.toMatch(/<button[^>]*aria-label="[^"]* E\d+"[^>]*disabled/);
+    expect(editing).toMatch(/<details class="dp"><summary>그날 한꺼번에 <span class="dp-caret">▸<\/span><span class="dp-staff">조우현 · 심명보 · 10:00–21:30<\/span><\/summary>/);
+    expect(editing).not.toContain("<details class=\"dp\" open");
+    expect(editing).toMatch(/<button[^>]*class="xg-cb"[^>]*aria-label="[^"]* E\d+"[^>]*>/);
+    expect(editing).not.toMatch(/<button[^>]*aria-label="[^"]* E\d+"[^>]*disabled/);
   });
 });
 

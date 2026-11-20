@@ -21,7 +21,7 @@ vi.stubGlobal("localStorage", {
 import { GraphClient, graphRetry } from "../sync/graph";
 import type { FakeDrive } from "../test/fakeGraph";
 import { LIST_GM_ID, LIST_ID, graphConfig, realDrive, realGmRecords, realListRecords } from "../test/realBooks";
-import { cellText, isEditable, normalizeResult, sortBySeq, type LiveRow, liveTarget, loadLiveList, matchRecord, recordPatch, writeLiveCell, LiveConflictError, type LiveTable } from "./liveList";
+import { cellText, isEditable, normalizeResult, liveTarget, loadLiveList, matchRecord, recordPatch, writeLiveCell, LiveConflictError, type LiveTable } from "./liveList";
 import { readSheet, workbookSheets } from "./ooxml";
 import { applyListCellEdits, getState, liveListClient } from "../store/session";
 import { LIST_LOGIN_TEXT, LIST_TIMEOUT_TEXT, listErrorText, readLiveList } from "../ui/ListScreen";
@@ -185,30 +185,19 @@ describe("리스트 탭 · OneDrive 검사리스트 바로 보기·고치기", (
   });
 });
 
-describe("리스트 탭 · 엑셀 순번(A열) 순서 · 1번 탭 카드 즉시 반영", () => {
-  const mk = (row: number, a: unknown): LiveRow => ({ row, cells: [{ address: `A${row}`, col: "A", row, value: a as never, formula: false }] });
-
-  it("물리 행이 3,1,2 순번이면 1,2,3 으로 보이고, 빈·숫자 아닌 순번은 뒤에 시트 행 순서대로", () => {
-    const rows = [mk(6, 3), mk(7, ""), mk(8, 1), mk(9, "비고"), mk(10, "2"), mk(11, null)];
-    expect(sortBySeq(rows).map((r) => r.row)).toEqual([8, 10, 6, 7, 9, 11]);
-    expect(rows.map((r) => r.row)).toEqual([6, 7, 8, 9, 10, 11]); // 원본 배열·값 그대로
-  });
-
-  it("OneDrive 시트에서 순번을 3,1,2 로 바꿔 두면 표는 순번 순서. 읽기만 하고 순번은 다시 쓰지 않는다", async () => {
+describe("리스트 탭 · 엑셀 시트 행 순서 · 1번 탭 카드 즉시 반영", () => {
+  it("OneDrive 시트에서 순번(A)을 3,1,2 로 바꿔 두어도 표는 시트 행 순서 그대로. 읽기만 하고 순번은 다시 쓰지 않는다", async () => {
     const recs = realListRecords();
     const app = recs.find((r) => r.src === "user")!;
     const first = await loadOk(app.site, recs);
-    const phys = first.rows.map((r) => r.row).sort((a, b) => a - b).slice(0, 3);
+    const phys = first.rows.map((r) => r.row).slice(0, 3);
     for (const [i, n] of [3, 1, 2].entries()) await client().patchValues(LIST_ID, first.sheetId, `A${phys[i]}`, [[n]]);
     drive.log.length = 0;
     const table = await loadOk(app.site, recs);
     expect(writes()).toEqual([]);
-    const seqs = table.rows.map((r) => r.cells[0].value);
-    expect(table.rows.slice(0, 3).map((r) => r.row)).toEqual([phys[1], phys[2], phys[0]]);
-    const nums = seqs.filter((v) => typeof v === "number") as number[];
-    expect(nums).toEqual([...nums].sort((a, b) => a - b));
-    const firstBlank = seqs.findIndex((v) => typeof v !== "number" && !/^\d+$/.test(String(v ?? "").trim()));
-    if (firstBlank >= 0) expect(seqs.slice(firstBlank).every((v) => typeof v !== "number")).toBe(true);
+    expect(table.rows.slice(0, 3).map((r) => r.cells[0].value)).toEqual([3, 1, 2]);
+    const rows = table.rows.map((r) => r.row);
+    expect(rows).toEqual([...rows].sort((a, b) => a - b));
   });
 
   it("리스트에서 E/F/G/P 를 저장하면 같은 앱 기록(1번 탭 카드)의 날짜·라인·포인트·합격/불합격이 바로 바뀐다", async () => {
@@ -265,7 +254,7 @@ describe("리스트 탭 · 실제 크기 시트(서식 65536행)와 실패 안�
     Object.assign(getState(), { config: graphConfig(), records: realListRecords(), loginNeeded: false });
   };
 
-  it("실제 합정주공 시트는 서식이 A1:AE65536 이라 usedRange 전체(값+수식)는 실패한다 — 값 범위만 확인하고 A–Y 를 나눠 읽어 순번 순서로 보인다", async () => {
+  it("실제 합정주공 시트는 서식이 A1:AE65536 이라 usedRange 전체(값+수식)는 실패한다 — 값 범위만 확인하고 A–Y 를 나눠 읽어 시트 행 순서로 보인다", async () => {
     // 예전 방식(usedRange 전체)은 가짜 Graph 에서도 실제처럼 실패한다(실제: 시간 초과/504 → 화면이 비거나 '읽는 중…').
     const recs = realListRecords();
     const c = client();
@@ -290,8 +279,8 @@ describe("리스트 탭 · 실제 크기 시트(서식 65536행)와 실패 안�
     expect(drive.log.some((e) => /A\d+:Y1[0-9]{3}'/.test(e.path))).toBe(false); // 1000행 아래 묶음은 묻지 않음
     const app = recs.find((r) => r.src === "user" && r.site === SITE)!;
     expect(table.rows.some((r) => r.row === app.excelRow)).toBe(true);
-    const seqs = table.rows.map((r) => r.cells[0].value).filter((v) => typeof v === "number") as number[];
-    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+    const rowNos = table.rows.map((r) => r.row);
+    expect(rowNos).toEqual([...rowNos].sort((a, b) => a - b));
     expect(table.header.find((h) => h.col === "F")?.title).toMatch(/line/i);
     // 수식 칸(L)은 수식으로 알아본다.
     expect(table.rows.some((r) => r.cells.find((x) => x.col === "L")?.formula)).toBe(true);

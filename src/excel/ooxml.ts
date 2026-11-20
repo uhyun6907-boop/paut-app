@@ -187,6 +187,86 @@ export function copyRowStyle(xml: string, fromRow: number, toRow: number): strin
   });
 }
 
+/**
+ * lo..hi 행의 firstCol..lastCol 칸을 sources 순서로 옮긴다(lo+i 행 ← sources[i] 행). 칸 서식(s)·행 높이도 따라가고,
+ * 수식의 상대 참조는 옮긴 만큼 바꾼다. 그 행들에 걸친 공유 수식은 같은 뜻의 보통 수식으로 풀어 둔다. 그 밖의 칸은 그대로.
+ */
+export function moveRowCells(sheetXml: string, lo: number, sources: number[], firstCol: number, lastCol: number): string {
+  const xml = unshareFormulas(sheetXml, new Set(sources));
+  const rowRe = (r: number) => new RegExp(`<row r="${r}"([^>]*?)(?:/>|>([\\s\\S]*?)</row>)`);
+  const original = new Map(sources.map((src) => [src, rowRe(src).exec(xml)]));
+  const cellsOf = (body: string | undefined) =>
+    [...(body ?? "").matchAll(/<c r="([A-Z]+)\d+"[^>]*?(?:\/>|>[\s\S]*?<\/c>)/g)].map((m) => ({ col: columnIndex(m[1]), letters: m[1], xml: m[0] }));
+  const inside = (col: number) => col >= firstCol && col <= lastCol;
+  let next = xml;
+  sources.forEach((src, i) => {
+    const target = lo + i;
+    if (src === target) return;
+    const from = original.get(src);
+    const to = original.get(target) ?? rowRe(target).exec(xml);
+    if (!from || !to) throw new Error(`${from ? target : src}행이 없습니다`);
+    const moved = cellsOf(from[2])
+      .filter((c) => inside(c.col))
+      .map((c) => ({
+        ...c,
+        xml: c.xml
+          .replace(`<c r="${c.letters}${src}"`, `<c r="${c.letters}${target}"`)
+          .replace(/<f>([^<]*)<\/f>/, (_all, f: string) => `<f>${shiftRefs(f, target - src, 0)}</f>`),
+      }));
+    const kept = cellsOf(to[2]).filter((c) => !inside(c.col));
+    const cells = [...kept, ...moved].sort((a, b) => a.col - b.col).map((c) => c.xml).join("");
+    const attrs = ROW_FORMAT_ATTRS.reduce((a, name) => a.replace(new RegExp(`\\s${name}="[^"]*"`), ""), to[1]) +
+      ROW_FORMAT_ATTRS.flatMap((name) => {
+        const value = new RegExp(`\\s${name}="([^"]*)"`).exec(from[1])?.[1];
+        return value === undefined ? [] : [` ${name}="${value}"`];
+      }).join("");
+    const current = rowRe(target).exec(next)!;
+    next = next.slice(0, current.index) + `<row r="${target}"${attrs}>${cells}</row>` + next.slice(current.index + current[0].length);
+  });
+  return next;
+}
+
+/** rows 에 칸이 있는 공유 수식 묶음 전체를 칸마다 보통 수식(<f>…</f>)으로. */
+function unshareFormulas(xml: string, rows: Set<number>): string {
+  const sharedRe = /<f\b([^>]*\bt="shared"[^>]*?)(?:\/>|>([^<]*)<\/f>)/g;
+  const siOf = (attrs: string) => /\bsi="(\d+)"/.exec(attrs)?.[1] ?? "";
+  const cellAt = (index: number) => {
+    const start = xml.lastIndexOf('<c r="', index);
+    const m = /^<c r="([A-Z]+)(\d+)"/.exec(xml.slice(start, start + 16))!;
+    return { col: columnIndex(m[1]), row: Number(m[2]) };
+  };
+  const masters = new Map<string, { col: number; row: number; formula: string }>();
+  const groups = new Set<string>();
+  for (const m of xml.matchAll(sharedRe)) {
+    const at = cellAt(m.index);
+    if (/\bref="/.test(m[1])) masters.set(siOf(m[1]), { ...at, formula: m[2] ?? "" });
+    if (rows.has(at.row)) groups.add(siOf(m[1]));
+  }
+  if (!groups.size) return xml;
+  return xml.replace(sharedRe, (all: string, attrs: string, text: string | undefined, offset: number) => {
+    const si = siOf(attrs);
+    if (!groups.has(si)) return all;
+    const master = masters.get(si);
+    if (!master) throw new Error(`공유 수식 ${si} 원본 없음`);
+    const at = cellAt(offset);
+    return `<f>${/\bref="/.test(attrs) ? (text ?? "") : shiftRefs(master.formula, at.row - master.row, at.col - master.col)}</f>`;
+  });
+}
+
+/** 수식의 상대 참조를 dRow 행·dCol 열만큼(F152 → F151). $ 가 붙은 쪽·따옴표 안 글자는 그대로. */
+function shiftRefs(formula: string, dRow: number, dCol: number): string {
+  return formula
+    .split(/("(?:[^"]|"")*")/)
+    .map((part, i) =>
+      i % 2
+        ? part
+        : part.replace(/(?<![A-Za-z0-9_$.])(\$?)([A-Z]{1,3})(\$?)(\d+)(?![A-Za-z0-9_(])/g, (_all, cAbs: string, col: string, rAbs: string, row: string) =>
+            `${cAbs}${cAbs ? col : columnLetter(columnIndex(col) + dCol)}${rAbs}${rAbs ? row : Number(row) + dRow}`,
+          ),
+    )
+    .join("");
+}
+
 /** <cols> 의 열 기본 서식 */
 function columnStyle(xml: string, col: number): string | undefined {
   const cols = /<cols>([\s\S]*?)<\/cols>/.exec(xml)?.[1];

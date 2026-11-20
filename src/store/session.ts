@@ -18,6 +18,7 @@ import {
   fileOf,
   workLogByDate,
   listLabel,
+  mirrorRowMove,
   rememberBaseline,
   rememberWork,
   restoreStatementOwnership,
@@ -2019,6 +2020,20 @@ export function applyListCellEdits(edits: { id: string; fields: Partial<Inspecti
   });
 }
 
+/**
+ * 리스트 탭에서 엑셀 행 순서를 바꾼 뒤: 옮긴 행과 맞는 앱 기록의 excelRow 를 새 행으로, 기기의 엑셀 사본도 같은 순서로.
+ * 엑셀로 다시 보내지 않는다.
+ */
+export function applyListRowMove(table: Pick<LiveTable, "book" | "sheetName">, lo: number, sources: number[], rows: { id: string; excelRow: number }[]): Promise<void> {
+  return enqueue(async () => {
+    const at = new Map(rows.map((r) => [r.id, r.excelRow]));
+    state.records = state.records.map((rec) => (at.has(rec.id) ? { ...rec, excelRow: at.get(rec.id) } : rec));
+    patch({ records: state.records });
+    await persistRecords();
+    if (mirrorRowMove(table.book, table.sheetName, lo, sources)) scheduleBookSave();
+  });
+}
+
 export type StaffEdit = Pick<DayStaff, "insp1" | "insp2" | "timeStart" | "timeEnd">;
 
 /** 그날 검사자·검사(근무)시간: 저장 때 남긴 값 → 오늘이면 지금 값 → 기기의 작업일지 사본 → 빈 값. */
@@ -2069,7 +2084,7 @@ export function setDayStaff(date: string, staff: StaffEdit, recordIds: string[])
 }
 
 /**
- * 리스트 탭이 엑셀에서 새로 읽은 표로, Y(앱 ID)가 같은 저장된 카드를 엑셀 값에 맞춘다(엑셀이 기준).
+ * 리스트 탭이 엑셀에서 새로 읽은 표로, Y(앱 ID)가 같은 저장된 카드를 엑셀 값·행 번호(excelRow)에 맞춘다(엑셀이 기준).
  * 엑셀로 다시 보내지 않고 미저장으로 만들지 않는다. 빈 칸은 카드 값을 지우지 않는다.
  * 아직 엑셀에 다 보내지 못한 카드(대기·보내는 중·실패)는 카드 쪽이 더 새 값이라 건드리지 않는다.
  */
@@ -2092,6 +2107,7 @@ export function pullFromList(table: LiveTable, site: string): Promise<void> {
           if (rec[field as keyof InspectionRecord] !== value) Object.assign(diff, { [field]: value });
         }
       }
+      if (rec.excelRow !== rows[0].row) diff.excelRow = rows[0].row;
       if (!Object.keys(diff).length) return rec;
       changed = true;
       return { ...rec, ...diff };

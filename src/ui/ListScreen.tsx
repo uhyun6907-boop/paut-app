@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isRemovedSite } from "../domain/mapping";
 import { LIST_BOOK_LABEL } from "../domain/types";
 import { cellText, isDateCol, isEditable, liveTarget, loadLiveList, matchRecord, recordPatch, writeLiveCell, writeLiveCells, LiveConflictError, type LiveCell, type LiveCellsResult, type LiveRow, type LiveTable } from "../excel/liveList";
+import { LiveMoveRefused, moveLiveRow, moveOrder, restoreLiveRows, type MoveSnapshot } from "../excel/liveMove";
 import { fileOf } from "../excel/engine";
 import { CACHE_STALE_TEXT, REFRESHING_TEXT, openList, saveListCache, savedAtText, type CacheSlot, type ListView } from "./listLoad";
 import { FilterPanel, FilterBar } from "./ListFilterPanel";
 import { applyFilters, type ListFilters } from "./listFilter";
-import { DATE_PAGE, MODE_LABEL, dotDate, shortLine, summarizeByDate, toggleDate, toggleEditing, toggleRow, verdictOf, visibleColumns, type ColumnMode, type DateFocus, type DateGroup } from "./listLayout";
+import { DATE_PAGE, MODE_LABEL, adjacentRows, dotDate, gridText, summarizeByDate, toggleDate, toggleEditing, toggleRow, verdictOf, visibleColumns, type ColumnMode, type DateFocus, type DateGroup } from "./listLayout";
 
 const MODE_KEY = "paut-list-columns";
 function readMode(): ColumnMode {
@@ -18,6 +19,7 @@ function readMode(): ColumnMode {
 }
 import {
   applyListCellEdits,
+  applyListRowMove,
   dayStaffOn,
   deleteSavedRecord,
   getState,
@@ -128,6 +130,40 @@ export function sentNote(action: RowAction, row: LiveRow, rec: InspectionRecord 
   return !rec || rec.steps?.list?.status === "done" ? `${head} · 검사리스트에 반영됨` : `${head} · 엑셀에 아직 못 보냄(위 동기화 상태를 확인하세요)`;
 }
 
+export const moveConfirmText = (row: LiveRow, neighbor: LiveRow) =>
+  `행 ${row.row} ↔ ${neighbor.row} 순서를 바꿀까요? ${rowLabel(row)} ↔ ${rowLabel(neighbor)} · 엑셀 B–Y 값·서식을 맞바꾸고 순번(A)은 그대로 둡니다.`;
+
+/**
+ * 「수정」 중 행 하나를 바로 위·아래 행과 맞바꾼다(엑셀 두 행의 B–Y 를 다시 씀). 제외 현장·아직 엑셀에 다 보내지 않은 카드가 있으면 하지 않는다.
+ * 확인을 받은 뒤에만 쓴다. 쓴 뒤 확인이 맞으면 카드의 excelRow 를 새 행으로, 다르면 다른 칸과 되돌리기용 snapshot 을 돌려준다.
+ * 다른 곳에서 바뀐 범위면 LiveConflictError, 옮길 수 없는 범위(병합 칸·메모 등)면 LiveMoveRefused.
+ */
+export async function applyRowMove(
+  client: GraphClient,
+  table: LiveTable,
+  site: string,
+  row: LiveRow,
+  neighbor: LiveRow,
+  confirm: (text: string) => boolean,
+): Promise<{ done: false; note: string } | { done: true; note: string; rows: LiveRow[]; snapshot: MoveSnapshot | null }> {
+  if (isRemovedSite(site)) return { done: false, note: `${site}: 제외된 현장이라 순서를 바꾸지 않습니다.` };
+  const records = getState().records;
+  const recs = [row, neighbor].map((r) => matchRecord(records, table, r));
+  const unsent = recs.filter((r) => r && r.sync !== "synced");
+  if (unsent.length) {
+    return { done: false, note: `${unsent.map((r) => r!.point).join(", ")}: 엑셀에 아직 다 보내지 않은 카드가 있어 순서를 바꾸지 않습니다. 동기화가 끝난 뒤 다시 하세요.` };
+  }
+  if (!confirm(moveConfirmText(row, neighbor))) return { done: false, note: "" };
+  const res = await moveLiveRow(client, table, row.row, neighbor.row);
+  if (res.mismatches.length) {
+    return { done: true, note: `행 ${row.row} ↔ ${neighbor.row} 쓰기 뒤 확인이 맞지 않습니다: ${res.mismatches.join(", ")}. 아래 「되돌리기」로 옮기기 전 모습을 다시 쓸 수 있습니다.`, rows: res.rows, snapshot: res.snapshot };
+  }
+  const { lo, sources } = moveOrder(row.row, neighbor.row);
+  const moved = [row, neighbor].flatMap((r, i) => (recs[i] ? [{ id: recs[i]!.id, excelRow: res.moved.get(r.row)! }] : []));
+  await applyListRowMove(table, lo, sources, moved);
+  return { done: true, note: `행 ${row.row} ↔ ${neighbor.row} 순서 바꿈 · 엑셀 다시 읽어 확인함${moved.length ? ` · 카드 ${moved.length}개 행 번호 맞춤` : ""}`, rows: res.rows, snapshot: null };
+}
+
 export const moveDateConfirmText = (group: DateGroup, date: string) => `${dotDate(group.date)} 의 ${group.rows.length}행을 ${dotDate(date)} 로 바꿀까요?`;
 
 function failedRowsText(failed: LiveCellsResult["failed"]): string {
@@ -216,11 +252,14 @@ function DayPanel(props: {
     </label>
   );
   return (
-    <div className="dp">
-      <div className="dp-title">그날 {group.rows.length}행 한꺼번에</div>
+    <details className="dp">
+      <summary>
+        그날 한꺼번에 <span className="dp-caret">▸</span>
+        <span className="dp-staff">{staffText(props.staff)}</span>
+      </summary>
       <div className="dp-row">
         <label className="dp-f wide">
-          <span>검사 날짜(E)</span>
+          <span>검사 날짜(E) · 그날 {group.rows.length}행</span>
           <input className="field-input" type="date" value={date} aria-label="검사 날짜 (그날 모든 행)" onChange={(e) => setDate(e.target.value)} />
         </label>
         <button className="btn small primary" type="button" disabled={busy || !date || date === group.date} onClick={() => onMoveDate(group, date)}>날짜 바꾸기</button>
@@ -235,102 +274,169 @@ function DayPanel(props: {
         <span className="dp-hint">검사자·검사시간은 리스트에 칸이 없어 작업일지에 씁니다(동기화)</span>
         <button className="btn small primary" type="button" disabled={busy} onClick={() => onStaff(group, staff)}>작업일지에 저장</button>
       </div>
+    </details>
+  );
+}
+
+function keepInsideGrid(el: HTMLDivElement | null): void {
+  const wrap = el?.closest(".xg-wrap")?.getBoundingClientRect();
+  const anchor = el?.parentElement?.getBoundingClientRect();
+  if (!el || !wrap || !anchor) return;
+  el.classList.toggle("end", anchor.left + el.offsetWidth > wrap.right && anchor.right - el.offsetWidth >= wrap.left);
+  el.classList.toggle("up", anchor.bottom + el.offsetHeight > wrap.bottom && anchor.top - el.offsetHeight >= wrap.top);
+  el.querySelector("input")?.focus({ preventScroll: true });
+}
+
+export interface CellEdit {
+  cell: LiveCell;
+  text: string;
+}
+
+function CellEditor(props: { edit: CellEdit; busy: boolean; onText: (text: string) => void; onSave: () => void; onCancel: () => void }) {
+  const { edit, busy, onText, onSave, onCancel } = props;
+  const place = useCallback(keepInsideGrid, []);
+  return (
+    <div className="xg-pop" ref={place} role="dialog" aria-label={`${edit.cell.address} 고치기`}>
+      <input
+        className="field-input"
+        type={isDateCol(edit.cell.col) ? "date" : "text"}
+        value={edit.text}
+        aria-label={`${edit.cell.address} 값`}
+        onChange={(e) => onText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onSave();
+          if (e.key === "Escape") onCancel();
+        }}
+      />
+      <div className="xg-pop-row">
+        <button className="btn small primary" type="button" disabled={busy} onClick={onSave}>{busy ? "저장 중…" : "저장"}</button>
+        <button className="btn small" type="button" disabled={busy} onClick={onCancel}>취소</button>
+      </div>
     </div>
   );
 }
 
-/** 「수정」 중 연 행의 칸들(보이는 열)과 리페어 처리·삭제. 고칠 수 있는 칸만 눌린다. */
-function RowEditor(props: {
+function RowMenu(props: {
   row: LiveRow;
-  cols: { col: string; title: string }[];
+  up: LiveRow | null;
+  down: LiveRow | null;
   record: InspectionRecord | null;
-  staff: StaffEdit;
-  editing: string | null;
+  busy: boolean;
+  onMove: (row: LiveRow, neighbor: LiveRow) => void;
+  onAction: (action: RowAction, row: LiveRow) => void;
+  onClose: () => void;
+}) {
+  const { row, up, down, record, busy, onMove, onAction, onClose } = props;
+  const place = useCallback(keepInsideGrid, []);
+  return (
+    <div className="xg-pop xg-menu" ref={place} role="menu" aria-label={`${row.row}행`}>
+      <button className="btn small" type="button" role="menuitem" disabled={busy || !up} onClick={() => up && onMove(row, up)}>위로</button>
+      <button className="btn small" type="button" role="menuitem" disabled={busy || !down} onClick={() => down && onMove(row, down)}>아래로</button>
+      {record ? (
+        <>
+          <button className="btn small" type="button" role="menuitem" disabled={busy || record.result === FAIL} onClick={() => onAction("repair", row)}>리페어 처리</button>
+          <button className="btn small danger" type="button" role="menuitem" disabled={busy} onClick={() => onAction("delete", row)}>삭제</button>
+        </>
+      ) : (
+        <span className="xg-norec">앱 기록 없음</span>
+      )}
+      <button className="btn small" type="button" role="menuitem" onClick={onClose}>취소</button>
+    </div>
+  );
+}
+
+function DateGrid(props: {
+  group: DateGroup;
+  cols: { col: string; title: string }[];
+  unlocked: boolean;
+  menuRow: number | null;
+  busy: boolean;
+  edit: CellEdit | null;
+  recordOf: (row: LiveRow) => InspectionRecord | null;
+  onRow: (row: number) => void;
   onCell: (cell: LiveCell) => void;
+  onEditText: (text: string) => void;
+  onSave: () => void;
+  onCancelEdit: () => void;
+  onMove: (row: LiveRow, neighbor: LiveRow) => void;
   onAction: (action: RowAction, row: LiveRow) => void;
 }) {
-  const { row, cols, record, staff, editing, onCell, onAction } = props;
+  const { group, cols, unlocked, menuRow, busy, edit, recordOf, onRow, onCell, onEditText, onSave, onCancelEdit, onMove, onAction } = props;
   return (
-    <div className="dr-edit">
-      <div className="dr-staff">
-        <span className="lc-k">검사자 · 검사시간</span>
-        <span className="lc-v">{staffText(staff)}</span>
-        <small>그날 값 · 위 「그날 한꺼번에」에서 고침(작업일지)</small>
-      </div>
-      <div className="dr-cells">
-        {cols.map(({ col, title }) => {
-          const cell = row.cells.find((c) => c.col === col);
-          if (!cell) return null;
-          const editable = isEditable(cell);
-          return (
-            <button
-              key={col}
-              type="button"
-              className={`lc-f${editable ? "" : " ro"}${editing === cell.address ? " on" : ""}`}
-              aria-label={`${title} ${cell.address}`}
-              disabled={!editable}
-              onClick={() => onCell(cell)}
-            >
-              <span className="lc-k">{title}</span>
-              <span className="lc-v">{cellText(cell) || "\u00a0"}</span>
-            </button>
-          );
-        })}
-      </div>
-      <div className="lc-actions">
-        {record ? (
-          <>
-            <button className="btn small" type="button" disabled={record.result === FAIL} onClick={() => onAction("repair", row)}>리페어 처리</button>
-            <button className="btn small danger" type="button" onClick={() => onAction("delete", row)}>삭제</button>
-          </>
-        ) : (
-          <span className="lc-norec">앱 기록 없음 · 칸만 고칠 수 있음</span>
-        )}
-      </div>
+    <div className="xg-wrap">
+      <table className={`xg${unlocked ? " unlocked" : ""}`}>
+        <thead>
+          <tr>
+            <th className="xg-rn" scope="col" aria-label="행" />
+            {cols.map(({ col, title }) => (
+              <th key={col} scope="col" className={`xg-h c-${col}`}>{title}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {group.rows.map((row) => {
+            const menu = unlocked && menuRow === row.row;
+            return (
+              <tr key={row.row}>
+                <th scope="row" className={`xg-rn${menu ? " open" : ""}`}>
+                  {unlocked ? (
+                    <button type="button" className="xg-rnb" aria-expanded={menu} aria-label={`${row.row}행 메뉴`} onClick={() => onRow(row.row)}>{row.row}</button>
+                  ) : (
+                    row.row
+                  )}
+                  {menu && <RowMenu row={row} {...adjacentRows(group.rows, row)} record={recordOf(row)} busy={busy} onMove={onMove} onAction={onAction} onClose={() => onRow(row.row)} />}
+                </th>
+                {cols.map(({ col, title }) => {
+                  const cell = row.cells.find((c) => c.col === col)!;
+                  const text = gridText(cell);
+                  const verdict = col === "P" ? verdictOf(row) : "";
+                  const cls = [`c-${col}`, typeof cell.value === "number" && !isDateCol(col) ? "num" : "", verdict ? `v-${verdict}` : ""].filter(Boolean);
+                  if (!unlocked) return <td key={col} className={cls.join(" ")}>{text}</td>;
+                  if (!isEditable(cell)) return <td key={col} className={[...cls, "ro"].join(" ")}>{text}</td>;
+                  const editing = edit?.cell.address === cell.address;
+                  return (
+                    <td key={col} className={[...cls, "ed", editing ? "on" : ""].filter(Boolean).join(" ")}>
+                      <button type="button" className="xg-cb" aria-label={`${title} ${cell.address}`} disabled={busy} onClick={() => onCell(cell)}>{text}</button>
+                      {editing && <CellEditor edit={edit} busy={busy} onText={onEditText} onSave={onSave} onCancel={onCancelEdit} />}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
-  );
-}
-
-/** 펼친 날짜의 행 한 칸: 포인트 · 합부 · 라인 번호 · 비고. */
-function RowLine({ row }: { row: LiveRow }) {
-  const text = (col: string) => {
-    const cell = row.cells.find((c) => c.col === col);
-    return cell ? cellText(cell).trim() : "";
-  };
-  const verdict = verdictOf(row);
-  return (
-    <>
-      <span className="dr-point">{text("G") || `${row.row}행`}</span>
-      <span className={`dr-verdict ${verdict}`}>{text("P") || "—"}</span>
-      <span className="dr-line">{[shortLine(text("F")), text("S")].filter(Boolean).join(" · ")}</span>
-    </>
   );
 }
 
 /**
- * 검사 날짜 하나: 접힌 요약(날짜·행 수·합격/불합격·라인별 포인트 범위). 누르면 그 날짜의 행이 한 줄씩 펼쳐진다(읽기만).
- * 펼친 날짜의 「수정」을 눌러야 행을 눌러 칸을 고치고 리페어 처리·삭제를 할 수 있다.
+ * 검사 날짜 하나: 접힌 요약(날짜·행 수·합격/불합격·라인별 포인트 범위). 누르면 그 날짜의 행이 엑셀 같은 표로 펼쳐진다(읽기만).
+ * 펼친 날짜의 「수정」을 눌러야 칸을 고치고, 행 번호로 순서 바꾸기·리페어 처리·삭제를 할 수 있다.
  */
 export function DateSummaryCard(props: {
   group: DateGroup;
   focus: DateFocus;
   cols: { col: string; title: string }[];
   busy: boolean;
-  editing: LiveCell | null;
+  edit: CellEdit | null;
   recordOf: (row: LiveRow) => InspectionRecord | null;
   staffOf: (date: string) => StaffEdit;
   onDate: (date: string) => void;
   onEditing: () => void;
   onRow: (row: number) => void;
   onCell: (cell: LiveCell) => void;
+  onEditText: (text: string) => void;
+  onSave: () => void;
+  onCancelEdit: () => void;
+  onMove: (row: LiveRow, neighbor: LiveRow) => void;
   onAction: (action: RowAction, row: LiveRow) => void;
   onMoveDate: (group: DateGroup, date: string) => void;
   onStaff: (group: DateGroup, staff: StaffEdit) => void;
 }) {
-  const { group, focus, cols, busy, editing, recordOf, staffOf, onDate, onEditing, onRow, onCell, onAction, onMoveDate, onStaff } = props;
+  const { group, focus, busy, staffOf, onDate, onEditing, onMoveDate, onStaff } = props;
   const open = focus?.date === group.date;
   const unlocked = open && focus.editing;
-  const staff = unlocked && group.date ? staffOf(group.date) : null;
   return (
     <section className={`ds${open ? " open" : ""}${unlocked ? " unlocked" : ""}`}>
       <button type="button" className="ds-head" aria-expanded={open} onClick={() => onDate(group.date)}>
@@ -346,41 +452,13 @@ export function DateSummaryCard(props: {
       {open && (
         <div className="ds-body">
           <div className="ds-bar">
-            <span>{unlocked ? "행을 눌러 고치기" : "읽기 전용"}</span>
+            <span>{unlocked ? "칸을 눌러 고치기 · 행 번호: 순서·리페어·삭제" : "읽기 전용"}</span>
             <button className={`btn small${unlocked ? " primary" : ""}`} type="button" disabled={busy} onClick={onEditing}>
               {unlocked ? "완료" : "수정"}
             </button>
           </div>
-          {unlocked && staff && <DayPanel key={group.date} group={group} staff={staff} busy={busy} onMoveDate={onMoveDate} onStaff={onStaff} />}
-          <div className="ds-rows">
-            {group.rows.map((row) => {
-              const rowOpen = unlocked && focus.row === row.row;
-              return (
-                <div key={row.row} className={`dr${verdictOf(row) === "bad" ? " fail" : ""}${rowOpen ? " on" : ""}`}>
-                  {unlocked ? (
-                    <button type="button" className="dr-row" aria-expanded={rowOpen} onClick={() => onRow(row.row)}>
-                      <RowLine row={row} />
-                    </button>
-                  ) : (
-                    <div className="dr-row">
-                      <RowLine row={row} />
-                    </div>
-                  )}
-                  {rowOpen && (
-                    <RowEditor
-                      row={row}
-                      cols={cols}
-                      record={recordOf(row)}
-                      staff={staff ?? { insp1: "", insp2: "", timeStart: "", timeEnd: "" }}
-                      editing={editing && editing.row === row.row ? editing.address : null}
-                      onCell={onCell}
-                      onAction={onAction}
-                    />
-                  )}
-                </div>
-              );
-            })}
-          </div>
+          {unlocked && group.date && <DayPanel key={group.date} group={group} staff={staffOf(group.date)} busy={busy} onMoveDate={onMoveDate} onStaff={onStaff} />}
+          <DateGrid {...props} unlocked={unlocked} menuRow={unlocked ? focus.row : null} />
         </div>
       )}
     </section>
@@ -397,7 +475,8 @@ export function ListScreen() {
   }, [session.config.mappings, session.records]);
   const [site, setSite] = useState(sites.includes(session.meta.lastSite) ? session.meta.lastSite : sites[0] ?? "");
   const [view, setView] = useState<ListView>({ status: "loading" });
-  const [edit, setEdit] = useState<{ cell: LiveCell; text: string } | null>(null);
+  const [edit, setEdit] = useState<CellEdit | null>(null);
+  const [undo, setUndo] = useState<MoveSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [filters, setFilters] = useState<ListFilters>({});
@@ -449,6 +528,7 @@ export function ListScreen() {
     const siteChanged = lastSite.current !== site;
     lastSite.current = site;
     if (siteChanged) {
+      setUndo(null);
       setFocus(null);
       setLimit(DATE_PAGE);
       setFilters({});
@@ -496,6 +576,7 @@ export function ListScreen() {
   async function act(action: RowAction, row: LiveRow): Promise<void> {
     if (view.status !== "ok" || busy) return;
     setEdit(null);
+    setFocus((f) => f && { ...f, row: null });
     setBusy(true);
     try {
       const res = await applyRowAction(action, view.table, row, (text) => window.confirm(text));
@@ -511,9 +592,17 @@ export function ListScreen() {
   }
 
   function showEdited(table: LiveTable, rows: Set<number>): void {
+    showTable({ ...table, rows: table.rows.map((r) => (rows.has(r.row) ? { ...r, cells: [...r.cells] } : r)) });
+  }
+
+  function showRows(table: LiveTable, changed: LiveRow[]): void {
+    const byRow = new Map(changed.map((r) => [r.row, r]));
+    showTable({ ...table, rows: table.rows.map((r) => byRow.get(r.row) ?? r) });
+  }
+
+  function showTable(next: LiveTable): void {
     const current = viewRef.current;
     if (current.status !== "ok") return;
-    const next: LiveTable = { ...table, rows: table.rows.map((r) => (rows.has(r.row) ? { ...r, cells: [...r.cells] } : r)) };
     const wasRefreshing = current.refreshing;
     if (wasRefreshing) {
       loadNo.current += 1;
@@ -552,10 +641,60 @@ export function ListScreen() {
       setNote(`${cell.address} 저장됨${rec && fields ? ` · 입력 탭 카드도 고침${fields.date ? ` (${fields.date})` : ""}` : ""}`);
       setEdit(null);
       showEdited(table, new Set([row.row]));
-      if (cell.col === "E" && cellText(cell)) setFocus({ date: cellText(cell), editing: true, row: row.row });
+      if (cell.col === "E" && cellText(cell)) setFocus({ date: cellText(cell), editing: true, row: null });
     } catch (error) {
       setNote(error instanceof LiveConflictError ? error.message : listErrorText(error));
       if (error instanceof LiveConflictError) void load(true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function move(row: LiveRow, neighbor: LiveRow): Promise<void> {
+    if (view.status !== "ok" || busy) return;
+    const { client, reason } = liveListClient();
+    if (!client) {
+      setNote(reason);
+      return;
+    }
+    setEdit(null);
+    setUndo(null);
+    setBusy(true);
+    const table = view.table;
+    try {
+      const res = await applyRowMove(client, table, site, row, neighbor, (text) => window.confirm(text));
+      setNote(res.note);
+      if (!res.done) return;
+      showRows(table, res.rows);
+      setUndo(res.snapshot);
+      setFocus((f) => f && { ...f, row: res.snapshot ? null : neighbor.row });
+    } catch (error) {
+      setNote(error instanceof LiveConflictError || error instanceof LiveMoveRefused ? error.message : listErrorText(error));
+      if (error instanceof LiveConflictError) void load(true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function restore(): Promise<void> {
+    if (view.status !== "ok" || busy || !undo) return;
+    const { client, reason } = liveListClient();
+    if (!client) {
+      setNote(reason);
+      return;
+    }
+    const snapshot = undo;
+    const hi = snapshot.lo + snapshot.rows.length - 1;
+    if (!window.confirm(`${snapshot.lo}–${hi}행을 옮기기 전 모습으로 다시 쓸까요?`)) return;
+    setUndo(null);
+    setBusy(true);
+    const table = view.table;
+    try {
+      const res = await restoreLiveRows(client, table, snapshot);
+      showRows(table, res.rows);
+      setNote(res.mismatches.length ? `되돌리기 뒤에도 다른 칸: ${res.mismatches.join(", ")}. PC 엑셀에서 ${snapshot.lo}–${hi}행을 확인하세요.` : `${snapshot.lo}–${hi}행 되돌림 · 엑셀 다시 읽어 확인함`);
+    } catch (error) {
+      setNote(listErrorText(error));
     } finally {
       setBusy(false);
     }
@@ -611,6 +750,9 @@ export function ListScreen() {
   const actRef = useRef(act);
   actRef.current = act;
   const onAction = useMemo(() => (action: RowAction, row: LiveRow) => void actRef.current(action, row), []);
+  const rowMoveRef = useRef(move);
+  rowMoveRef.current = move;
+  const onMove = useMemo(() => (row: LiveRow, neighbor: LiveRow) => void rowMoveRef.current(row, neighbor), []);
   const moveRef = useRef(moveDate);
   moveRef.current = moveDate;
   const onMoveDate = useMemo(() => (group: DateGroup, date: string) => void moveRef.current(group, date), []);
@@ -660,27 +802,8 @@ export function ListScreen() {
       )}
 
       {note && <div className="nav-hint" role="status">{note}</div>}
-
-      {edit && (
-        <div className="card live-edit">
-          <div className="title">{edit.cell.address} 고치기</div>
-          <input
-            className="field-input"
-            autoFocus
-            type={isDateCol(edit.cell.col) ? "date" : "text"}
-            value={edit.text}
-            aria-label={`${edit.cell.address} 값`}
-            onChange={(e) => setEdit({ ...edit, text: e.target.value })}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void save();
-              if (e.key === "Escape") setEdit(null);
-            }}
-          />
-          <div className="row">
-            <button className="btn primary" type="button" disabled={busy} onClick={() => void save()}>{busy ? "저장 중…" : "엑셀에 저장"}</button>
-            <button className="btn" type="button" disabled={busy} onClick={() => setEdit(null)}>취소</button>
-          </div>
-        </div>
+      {undo && (
+        <button className="btn block" type="button" disabled={busy} onClick={() => void restore()}>되돌리기 ({undo.lo}–{undo.lo + undo.rows.length - 1}행)</button>
       )}
 
       {view.status === "loading" && <div className="empty-note" role="status">OneDrive 에서 {target ? `「${target.sheetName.trim()}」 시트를` : "검사리스트를"} 읽는 중…</div>}
@@ -733,13 +856,17 @@ export function ListScreen() {
                       focus={focus}
                       cols={cols}
                       busy={busy}
-                      editing={edit?.cell ?? null}
+                      edit={edit}
                       recordOf={recordOf}
                       staffOf={dayStaffOn}
                       onDate={(date) => refocus((f) => toggleDate(f, date))}
                       onEditing={() => refocus(toggleEditing)}
                       onRow={(row) => refocus((f) => toggleRow(f, row))}
                       onCell={onCell}
+                      onEditText={(text) => setEdit((e) => e && { ...e, text })}
+                      onSave={() => void save()}
+                      onCancelEdit={() => setEdit(null)}
+                      onMove={onMove}
                       onAction={onAction}
                       onMoveDate={onMoveDate}
                       onStaff={onStaff}

@@ -392,27 +392,40 @@ export class FakeDrive {
         if ((box.r2 - box.r1 + 1) * (box.c2 - box.c1 + 1) > FakeDrive.maxCells) return err(504, "GatewayTimeout: response payload too large");
         const values: (string | number)[][] = [];
         const formulas: (string | number)[][] = [];
+        const formulasR1C1: (string | number)[][] = [];
+        const valueTypes: string[][] = [];
         for (let r = box.r1; r <= box.r2; r++) {
           const row: (string | number)[] = [];
           const frow: (string | number)[] = [];
+          const rrow: (string | number)[] = [];
+          const trow: string[] = [];
           for (let c = box.c1; c <= box.c2; c++) {
             const cell = cells.get(columnLetter(c) + r);
             const v = graphValue(cell);
             row.push(v);
             frow.push(cell?.f ? `=${cell.f}` : v);
+            rrow.push(cell?.f ? `=${toR1C1(cell.f, r, c)}` : v);
+            trow.push(v === "" ? "Empty" : typeof v === "number" ? "Double" : "String");
           }
           values.push(row);
           formulas.push(frow);
+          formulasR1C1.push(rrow);
+          valueTypes.push(trow);
         }
         const numberFormat = /\$select=[^&]*numberFormat/.test(range[4] ?? "")
           ? values.map((row, i) => row.map((_, j) => this.formatOf(itemId, item.files, sheet.path, columnLetter(box.c1 + j) + (box.r1 + i)).numberFormat))
           : undefined;
-        return json({ address: range[2], values, formulas, numberFormat });
+        return json({ address: range[2], values, formulas, formulasR1C1, valueTypes, numberFormat });
       }
       if (method === "PATCH") {
         const ifMatch = headers.get("If-Match");
         if (ifMatch && ifMatch !== etag(itemId, item.version)) return err(412, "resourceModified");
-        const body = JSON.parse(String(init.body)) as { formulas?: (string | number | null)[][]; values?: (string | number | null)[][]; numberFormat?: string[][] };
+        const body = JSON.parse(String(init.body)) as {
+          formulas?: (string | number | null)[][];
+          formulasR1C1?: (string | number | null)[][];
+          values?: (string | number | null)[][];
+          numberFormat?: string[][];
+        };
         this.log[this.log.length - 1].body = body;
         if (body.numberFormat) {
           const nf = body.numberFormat;
@@ -420,7 +433,11 @@ export class FakeDrive {
           nf.forEach((row, i) => row.forEach((f, j) => this.editFormat(itemId, sheet.path, columnLetter(box.c1 + j) + (box.r1 + i), (e) => (e.numberFormat = f))));
           return json({ address: range[2] });
         }
-        const grid = body.formulas ?? body.values ?? [];
+        const grid =
+          body.formulasR1C1?.map((row, i) => row.map((v, j) => (typeof v === "string" && v.startsWith("=") ? `=${toA1(v.slice(1), box.r1 + i, box.c1 + j)}` : v))) ??
+          body.formulas ??
+          body.values ??
+          [];
         if (grid.length !== box.r2 - box.r1 + 1 || grid.some((row) => row.length !== box.c2 - box.c1 + 1)) {
           return err(400, "The number of rows or columns in the input array doesn't match the size or dimensions of the range.");
         }
@@ -466,6 +483,35 @@ function parseAddress(address: string): { c1: number; r1: number; c2: number; r2
   const pa = /^([A-Z]+)(\d+)$/.exec(a)!;
   const pb = /^([A-Z]+)(\d+)$/.exec(b ?? a)!;
   return { c1: columnIndex(pa[1]), r1: Number(pa[2]), c2: columnIndex(pb[1]), r2: Number(pb[2]) };
+}
+
+/** 수식의 칸 참조를 바꾼다. 따옴표 안 글자는 건드리지 않는다. */
+function mapOutsideStrings(formula: string, re: RegExp, replace: (...m: string[]) => string): string {
+  return formula
+    .split(/("(?:[^"]|"")*")/)
+    .map((part, i) => (i % 2 ? part : part.replace(re, replace as never)))
+    .join("");
+}
+
+/** A1 → R1C1(row·col 칸 기준 상대). Graph formulasR1C1 흉내. */
+function toR1C1(formula: string, row: number, col: number): string {
+  return mapOutsideStrings(formula, /(?<![A-Za-z0-9_$.])(\$?)([A-Z]{1,3})(\$?)(\d+)(?![A-Za-z0-9_(])/g, (_all, cAbs, letters, rAbs, digits) => {
+    const r = Number(digits);
+    const c = columnIndex(letters);
+    const R = rAbs ? `R${r}` : r === row ? "R" : `R[${r - row}]`;
+    const C = cAbs ? `C${c}` : c === col ? "C" : `C[${c - col}]`;
+    return R + C;
+  });
+}
+
+/** R1C1(row·col 칸 기준) → A1. */
+function toA1(formula: string, row: number, col: number): string {
+  return mapOutsideStrings(formula, /(?<![A-Za-z0-9_])R(\[-?\d+\]|\d+)?C(\[-?\d+\]|\d+)?(?![A-Za-z0-9_(])/g, (_all, rPart, cPart) => {
+    const part = (p: string | undefined, base: number) => (!p ? { n: base, abs: false } : p.startsWith("[") ? { n: base + Number(p.slice(1, -1)), abs: false } : { n: Number(p), abs: true });
+    const r = part(rPart, row);
+    const c = part(cPart, col);
+    return `${c.abs ? "$" : ""}${columnLetter(c.n)}${r.abs ? "$" : ""}${r.n}`;
+  });
 }
 
 function graphValue(c: XCell | undefined): string | number {
