@@ -26,8 +26,12 @@ import { readSheet } from "../excel/ooxml";
 import { packTable, unpackTable } from "../store/listCache";
 import { CACHE_STALE_TEXT, loadListCache, mergeTables, openList, type CacheSlot, type ListView } from "./listLoad";
 import { BLANK, activeColumns, applyFilters, clearColumn, columnValues, countText, filterableColumns, setText, toggleValue, type ListFilters } from "./listFilter";
-import { getState, liveListClient } from "../store/session";
-import { CARD_PAGE, KEY_COLS, MODE_LABEL, pageRows, visibleColumns } from "./listLayout";
+import { getState, liveListClient, settled } from "../store/session";
+import { CARD_PAGE, KEY_COLS, MODE_LABEL, groupByDate, pageRows, visibleColumns, type DateGroup } from "./listLayout";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { matchRecord } from "../excel/liveList";
+import { DateGroupCard, applyRowAction, deleteConfirmText } from "./ListScreen";
 
 const SITE = "드림 합정주공";
 let drive: FakeDrive;
@@ -310,6 +314,81 @@ describe("리스트 휴대폰 카드 보기 · 주요 열 / 모든 열", () => {
     const again = await fresh();
     expect(again.rows.length).toBe(table.rows.length);
     expect(again.rows.map((r) => r.row)).toEqual(table.rows.map((r) => r.row));
+  });
+});
+
+describe("리스트 검사 날짜 묶음 · 「수정」 전에는 읽기만", () => {
+  function render(group: DateGroup, unlocked: boolean, cols: { col: string; title: string }[]): string {
+    return renderToStaticMarkup(
+      createElement(DateGroupCard, {
+        group,
+        cols,
+        unlocked,
+        busy: false,
+        editing: null,
+        recordOf: (row) => matchRecord(getState().records, { book: "list", sheetName: SITE }, row),
+        onToggle: () => undefined,
+        onCell: () => undefined,
+        onAction: () => undefined,
+      }),
+    );
+  }
+
+  it("행을 검사 날짜(E)별로 묶는다. 날짜 없는 행은 따로, 묶음 안 순서는 순번 그대로", async () => {
+    const table = await fresh();
+    const groups = groupByDate(table.rows);
+    expect(groups.flatMap((g) => g.rows).length).toBe(table.rows.length);
+    for (const g of groups) {
+      expect(g.rows.every((r) => cellText(r.cells.find((c) => c.col === "E")!).trim() === g.date)).toBe(true);
+      const at = g.rows.map((r) => table.rows.indexOf(r));
+      expect(at).toEqual([...at].sort((a, b) => a - b));
+    }
+    expect(new Set(groups.map((g) => g.date)).size).toBe(groups.length);
+    const undated = { ...table.rows[0], row: 99999, cells: table.rows[0].cells.map((c) => (c.col === "E" ? { ...c, value: "" } : c)) };
+    expect(groupByDate([...table.rows, undated]).at(-1)).toEqual({ date: "", rows: [undated] });
+  });
+
+  it("「수정」 전에는 모든 칸이 눌리지 않고 리페어 처리·삭제도 없다. 「수정」 뒤에는 고칠 수 있는 칸만 눌리고 행마다 두 버튼", async () => {
+    const table = await fresh();
+    getState().records.splice(0, getState().records.length, ...realListRecords());
+    const group = groupByDate(table.rows).find((g) => g.date && g.rows.some((r) => matchRecord(getState().records, table, r)))!;
+    const cols = visibleColumns(table.header, "all");
+    const cellButtons = (html: string) => [...html.matchAll(/<button[^>]*class="lc-f[^"]*"[^>]*>/g)].map((m) => m[0]);
+
+    const locked = render(group, false, cols);
+    expect(locked).toContain(`${group.rows.length}행`);
+    expect(locked).toContain(">수정</button>");
+    expect(cellButtons(locked).length).toBeGreaterThan(group.rows.length * 4);
+    expect(cellButtons(locked).every((b) => b.includes("disabled"))).toBe(true);
+    expect(locked).not.toContain("삭제");
+    expect(locked).not.toContain("리페어 처리");
+
+    const open = render(group, true, cols);
+    expect(open).toContain(">완료</button>");
+    const enabled = cellButtons(open).filter((b) => !b.includes("disabled"));
+    expect(enabled.some((b) => b.includes(`aria-label="${cols.find((c) => c.col === "P")!.title} P`))).toBe(true);
+    expect(enabled.some((b) => / Y\d+"/.test(b))).toBe(false);
+    expect(open.match(/>삭제<\/button>/g)?.length).toBe(group.rows.filter((r) => matchRecord(getState().records, table, r)).length);
+  });
+
+  it("「삭제」는 확인을 받아야만 지운다. 취소하면 앱 기록·엑셀 대기 모두 그대로", async () => {
+    getState().records.splice(0, getState().records.length, ...realListRecords());
+    const table = await fresh();
+    const row = table.rows.find((r) => matchRecord(getState().records, table, r) && cellText(r.cells.find((c) => c.col === "G")!))!;
+    const rec = matchRecord(getState().records, table, row)!;
+    const before = JSON.stringify(rec);
+    const asked: string[] = [];
+    const res = await applyRowAction("delete", table, row, (text) => (asked.push(text), false));
+    await settled();
+    expect(res).toEqual({ done: false, note: "" });
+    expect(asked).toEqual([deleteConfirmText(row)]);
+    expect(asked[0]).toMatch(/^\S+ \(\d{2}\.\d{2}\.\d{2}\) 기록을 지울까요\? 엑셀 행 내용이 지워집니다\.$/);
+    expect(JSON.stringify(getState().records.find((r) => r.id === rec.id))).toBe(before);
+
+    const ok = await applyRowAction("delete", table, row, () => true);
+    await settled();
+    expect(ok.done).toBe(true);
+    expect(getState().records.find((r) => r.id === rec.id)).toMatchObject({ deleted: true, sync: "pending" });
   });
 });
 

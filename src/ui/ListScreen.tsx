@@ -6,7 +6,7 @@ import { listFileOf } from "../excel/engine";
 import { CACHE_STALE_TEXT, REFRESHING_TEXT, openList, saveListCache, savedAtText, type CacheSlot, type ListView } from "./listLoad";
 import { FilterPanel, FilterBar } from "./ListFilterPanel";
 import { applyFilters, type ListFilters } from "./listFilter";
-import { CARD_PAGE, MODE_LABEL, pageRows, visibleColumns, type ColumnMode } from "./listLayout";
+import { CARD_PAGE, MODE_LABEL, groupByDate, pageRows, visibleColumns, type ColumnMode, type DateGroup } from "./listLayout";
 
 const MODE_KEY = "paut-list-columns";
 function readMode(): ColumnMode {
@@ -16,7 +16,20 @@ function readMode(): ColumnMode {
     return "key";
   }
 }
-import { applyListCellEdit, getState, graphReadOk, liveListClient, signIn, useSession } from "../store/session";
+import {
+  applyListCellEdit,
+  deleteSavedRecord,
+  getState,
+  graphReadOk,
+  liveListClient,
+  rememberListFile,
+  repairSavedRecord,
+  settled,
+  signIn,
+  syncIdle,
+  useSession,
+} from "../store/session";
+import { FAIL, type InspectionRecord } from "../domain/types";
 import { GRAPH_TIMEOUT_TEXT, GraphError, type GraphClient } from "../sync/graph";
 import { isLoginError, isLoginFailureText } from "../sync/authState";
 import { ABORTED_TEXT, isTimeoutLike, TOKEN_TIMEOUT_TEXT, withTimeout } from "../sync/timeout";
@@ -57,8 +70,11 @@ export async function readLiveList(
   try {
     const live = getState();
     const res = await withTimeout(loadLiveList(client, live.config, site, live.records), timeoutMs, LIST_TIMEOUT_TEXT);
-    if (res.ok) graphReadOk();
-    if (res.ok) return res;
+    if (res.ok) {
+      graphReadOk();
+      await rememberListFile(res.table.book, { id: res.table.itemId, name: res.table.fileName });
+      return res;
+    }
     return { ok: false, message: isLoginFailureText(res.message) ? LIST_LOGIN_TEXT : res.message || "검사리스트를 읽지 못했습니다." };
   } catch (error) {
     client.abort();
@@ -66,17 +82,62 @@ export async function readLiveList(
   }
 }
 
+/** 확인 창에 쓰는 행 이름. 예: S38 (26.06.18) */
+export function rowLabel(row: LiveRow): string {
+  const text = (col: string) => {
+    const cell = row.cells.find((c) => c.col === col);
+    return cell ? cellText(cell).trim() : "";
+  };
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(text("E")) ? text("E").slice(2).replace(/-/g, ".") : text("E");
+  const point = text("G") || `${row.row}행`;
+  return date ? `${point} (${date})` : point;
+}
+
+export const deleteConfirmText = (row: LiveRow) => `${rowLabel(row)} 기록을 지울까요? 엑셀 행 내용이 지워집니다.`;
+export const repairConfirmText = (row: LiveRow) => `${rowLabel(row)} 리페어 처리할까요? 판정이 불합격이 되고 재검사 카드가 생깁니다.`;
+
+export type RowAction = "repair" | "delete";
+
+const ACTION_LABEL: Record<RowAction, string> = { repair: "리페어 처리", delete: "삭제" };
+
+/**
+ * 「수정」 중인 날짜 묶음의 행 하나에 리페어 처리·삭제. 확인을 받은 뒤에만 앱 기록을 바꾸고 엑셀 대기열에 넣는다.
+ * done 이면 recordId 의 동기화가 끝난 뒤 sentNote 로 결과를 보인다.
+ */
+export async function applyRowAction(
+  action: RowAction,
+  table: Pick<LiveTable, "book" | "sheetName">,
+  row: LiveRow,
+  confirm: (text: string) => boolean,
+): Promise<{ done: false; note: string } | { done: true; note: string; recordId: string }> {
+  const rec = matchRecord(getState().records, table, row);
+  if (!rec) return { done: false, note: `${rowLabel(row)}: 이 행과 맞는 앱 기록이 없어 바꾸지 않았습니다. '새로 불러오기' 뒤 다시 하세요.` };
+  if (!confirm(action === "delete" ? deleteConfirmText(row) : repairConfirmText(row))) return { done: false, note: "" };
+  await (action === "delete" ? deleteSavedRecord(rec.id) : repairSavedRecord(rec.id));
+  return { done: true, note: `${rowLabel(row)} ${ACTION_LABEL[action]} · 엑셀에 보내는 중`, recordId: rec.id };
+}
+
+/** 동기화가 끝난 뒤 문구: 검사리스트 행까지 썼는지. 지움을 다 보낸 기록은 앱에서 치워져 rec 이 없다. */
+export function sentNote(action: RowAction, row: LiveRow, rec: InspectionRecord | undefined): string {
+  const head = `${rowLabel(row)} ${ACTION_LABEL[action]}`;
+  return !rec || rec.steps?.list?.status === "done" ? `${head} · 검사리스트에 반영됨` : `${head} · 엑셀에 아직 못 보냄(위 동기화 상태를 확인하세요)`;
+}
+
 /**
  * 행 카드 한 장(휴대폰용, 가로 스크롤 없음). 위: 순번·날짜·판정 / 가운데: 라인·포인트 크게 / 아래: 비고와(모든 열이면) 나머지 열.
- * 칸을 누르면 그 칸만 고친다. 바뀌지 않은 행은 다시 그리지 않는다(뒤에서 새로 읽어도 깜빡이지 않게).
+ * 날짜 묶음이 「수정」 중일 때만 칸을 눌러 고치고, 리페어 처리·삭제 버튼이 보인다.
+ * 바뀌지 않은 행은 다시 그리지 않는다(뒤에서 새로 읽어도 깜빡이지 않게).
  */
 const LiveRowCard = memo(function LiveRowCard(props: {
   row: LiveRow;
   cols: { col: string; title: string }[];
+  unlocked: boolean;
+  record: InspectionRecord | null;
   editing: string | null;
   onCell: (cell: LiveCell) => void;
+  onAction: (action: RowAction, row: LiveRow) => void;
 }) {
-  const { row, cols, editing, onCell } = props;
+  const { row, cols, unlocked, record, editing, onCell, onAction } = props;
   const cellOf = (col: string) => row.cells.find((c) => c.col === col);
   const seq = cellOf("A");
   const result = cellOf("P");
@@ -85,15 +146,16 @@ const LiveRowCard = memo(function LiveRowCard(props: {
   const field = (col: string, title: string, cls = "") => {
     const cell = cellOf(col);
     if (!cell) return null;
-    const editable = isEditable(cell);
+    const editable = unlocked && isEditable(cell);
     const text = cellText(cell);
     return (
       <button
         key={col}
         type="button"
-        className={`lc-f ${cls}${editable ? "" : " ro"}${editing === cell.address ? " on" : ""}`}
+        className={`lc-f ${cls}${unlocked && !editable ? " ro" : ""}${editing === cell.address ? " on" : ""}`}
         aria-label={`${title} ${cell.address}`}
-        onClick={() => editable && onCell(cell)}
+        disabled={!editable}
+        onClick={() => onCell(cell)}
       >
         <span className="lc-k">{title}</span>
         <span className="lc-v">{text || "\u00a0"}</span>
@@ -115,9 +177,59 @@ const LiveRowCard = memo(function LiveRowCard(props: {
         {has("G") && field("G", title("G"), "point")}
       </div>
       <div className="lc-rest">{cols.filter((c) => !main.has(c.col)).map((c) => field(c.col, c.title))}</div>
+      {unlocked && (
+        <div className="lc-actions">
+          {record ? (
+            <>
+              <button className="btn small" type="button" disabled={record.result === FAIL} onClick={() => onAction("repair", row)}>리페어 처리</button>
+              <button className="btn small danger" type="button" onClick={() => onAction("delete", row)}>삭제</button>
+            </>
+          ) : (
+            <span className="lc-norec">앱 기록 없음 · 칸만 고칠 수 있음</span>
+          )}
+        </div>
+      )}
     </div>
   );
 });
+
+/** 검사 날짜 하나의 묶음. 「수정」을 누르기 전에는 읽기만 한다. */
+export function DateGroupCard(props: {
+  group: DateGroup;
+  cols: { col: string; title: string }[];
+  unlocked: boolean;
+  busy: boolean;
+  editing: LiveCell | null;
+  recordOf: (row: LiveRow) => InspectionRecord | null;
+  onToggle: (date: string) => void;
+  onCell: (cell: LiveCell) => void;
+  onAction: (action: RowAction, row: LiveRow) => void;
+}) {
+  const { group, cols, unlocked, busy, editing, recordOf, onToggle, onCell, onAction } = props;
+  return (
+    <section className={`lc-group${unlocked ? " unlocked" : ""}`}>
+      <div className="lc-group-head">
+        <strong>{group.date || "날짜 없음"}</strong>
+        <span>{group.rows.length}행</span>
+        <button className={`btn small${unlocked ? " primary" : ""}`} type="button" disabled={busy} onClick={() => onToggle(group.date)}>
+          {unlocked ? "완료" : "수정"}
+        </button>
+      </div>
+      {group.rows.map((row) => (
+        <LiveRowCard
+          key={row.row}
+          row={row}
+          cols={cols}
+          unlocked={unlocked}
+          record={unlocked ? recordOf(row) : null}
+          editing={editing && editing.row === row.row ? editing.address : null}
+          onCell={onCell}
+          onAction={onAction}
+        />
+      ))}
+    </section>
+  );
+}
 
 /** 세 번째 탭: 현장별 OneDrive 검사리스트 시트를 그대로 보여 주고, 칸 하나를 고치면 그 칸만 엑셀에 쓴다. */
 export function ListScreen() {
@@ -136,6 +248,7 @@ export function ListScreen() {
   const [filterCol, setFilterCol] = useState<string | null>(null);
   const [mode, setMode] = useState<ColumnMode>(readMode);
   const [limit, setLimit] = useState(CARD_PAGE);
+  const [unlockedDate, setUnlockedDate] = useState<string | null>(null);
   function chooseMode(next: ColumnMode): void {
     setMode(next);
     try { localStorage.setItem(MODE_KEY, next); } catch { /* 저장 불가 */ }
@@ -180,6 +293,7 @@ export function ListScreen() {
     const siteChanged = lastSite.current !== site;
     lastSite.current = site;
     if (siteChanged) {
+      setUnlockedDate(null);
       setLimit(CARD_PAGE);
       setFilters({});
       setFilterCol(null);
@@ -216,6 +330,29 @@ export function ListScreen() {
     },
     [],
   );
+
+  function toggleGroup(date: string): void {
+    setEdit(null);
+    setNote("");
+    setUnlockedDate((current) => (current === date ? null : date));
+  }
+
+  async function act(action: RowAction, row: LiveRow): Promise<void> {
+    if (view.status !== "ok" || busy) return;
+    setEdit(null);
+    setBusy(true);
+    try {
+      const res = await applyRowAction(action, view.table, row, (text) => window.confirm(text));
+      setNote(res.note);
+      if (!res.done) return;
+      await settled();
+      await syncIdle();
+      setNote(sentNote(action, row, getState().records.find((r) => r.id === res.recordId)));
+      await load(true);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function save(): Promise<void> {
     if (!edit || view.status !== "ok" || busy) return;
@@ -267,6 +404,11 @@ export function ListScreen() {
   // 필터가 바뀌면 카드는 처음부터(앞 200장).
   useEffect(() => setLimit(CARD_PAGE), [filters]);
   const cols = useMemo(() => (table ? visibleColumns(table.header, mode) : []), [table, mode]);
+  const groups = useMemo(() => groupByDate(pageRows(shownRows, limit)), [shownRows, limit]);
+  const recordOf = (row: LiveRow) => (table ? matchRecord(session.records, table, row) : null);
+  const actRef = useRef(act);
+  actRef.current = act;
+  const onAction = useMemo(() => (action: RowAction, row: LiveRow) => void actRef.current(action, row), []);
   const loginStale = view.status === "ok" && view.staleError === LIST_LOGIN_TEXT;
 
   return (
@@ -280,7 +422,7 @@ export function ListScreen() {
         </select>
         {target && (
           <p className="nav-hint">
-            {LIST_BOOK_LABEL[target.book]} · 시트 「{target.sheetName}」 · OneDrive 에서 바로 읽음. 칸을 눌러 고치면 그 칸만 엑셀에 씁니다(시트·행은 만들지 않음).
+            {LIST_BOOK_LABEL[target.book]} · 시트 「{target.sheetName}」 · OneDrive 에서 바로 읽음. 검사 날짜 묶음의 「수정」을 눌러야 고칠 수 있고, 고친 칸만 엑셀에 씁니다(시트·행은 만들지 않음).
           </p>
         )}
         <button className="btn block" type="button" disabled={view.status === "loading" || busy || (view.status === "ok" && view.refreshing)} onClick={() => void load(view.status === "ok")}>
@@ -375,13 +517,18 @@ export function ListScreen() {
             ) : (
               <>
                 <div className="lc-list">
-                  {pageRows(shownRows, limit).map((row) => (
-                    <LiveRowCard
-                      key={row.row}
-                      row={row}
+                  {groups.map((group) => (
+                    <DateGroupCard
+                      key={group.date}
+                      group={group}
                       cols={cols}
-                      editing={edit && edit.cell.row === row.row ? edit.cell.address : null}
+                      unlocked={unlockedDate === group.date}
+                      busy={busy}
+                      editing={edit?.cell ?? null}
+                      recordOf={recordOf}
+                      onToggle={toggleGroup}
                       onCell={onCell}
+                      onAction={onAction}
                     />
                   ))}
                 </div>

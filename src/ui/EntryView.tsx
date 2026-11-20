@@ -29,6 +29,7 @@ import {
   srMirrorEnabled,
   getState,
   inspectorsOnDate,
+  isSaved,
   markNoWeld,
   removeRecord,
   renamePoint,
@@ -415,16 +416,17 @@ export function EntryView() {
               event.preventDefault();
             }}
           >
-            {cards.map((card) => card.kind === "record" ? (
+            {cards.map((card) => card.kind === "saved" ? (
+              <SavedCard key={card.key} rec={card.rec} re={card.re} />
+            ) : card.kind === "record" ? (
               <PointCard
                 key={card.key}
                 label={card.rec.point}
                 paintKey={card.key}
                 date={card.rec.date ? shortDate(card.rec.date) : ""}
-                state={paintedLook(card.key, { kind: "record", result: card.rec.result }) ? "pass" : card.rec.result === FAIL ? "fail" : card.rec.result === "없음" ? "absent" : "pass"}
-                caption={paintedLook(card.key, { kind: "record", result: card.rec.result }) ? PASS : card.rec.result === "없음" ? "없음" : card.rec.result}
+                state={paintedLook(card.key, { kind: "record", result: card.rec.result }) ? "pass" : recordState(card.rec)}
+                caption={paintedLook(card.key, { kind: "record", result: card.rec.result }) ? PASS : card.rec.result}
                 re={card.re}
-                armed={hint?.kind === "record" && hint.id === card.rec.id}
                 onTap={() => { if (card.rec.result !== "없음") tapCard(card.key); }}
                 onLong={() => { cancelPaint(); setHint(null); setDateDraft(card.rec.date); setDateEdit({ id: card.rec.id, point: card.rec.point, date: card.rec.date }); }}
               />
@@ -765,6 +767,22 @@ function editPillStyle(hint: EditHint): { left: number; top: number; transform: 
   };
 }
 
+function recordState(rec: InspectionRecord): "pass" | "fail" | "absent" {
+  return rec.result === FAIL ? "fail" : rec.result === "없음" ? "absent" : "pass";
+}
+
+/** 저장된 기록 카드. 누르기·길게 누르기·칠하기 모두 받지 않는다(고치기는 리스트 탭 「수정」). */
+function SavedCard({ rec, re }: { rec: InspectionRecord; re: boolean }) {
+  const date = rec.date ? shortDate(rec.date) : "";
+  return (
+    <div className={`pcard ${recordState(rec)} saved`} data-point={rec.point} data-state="saved" aria-label={`${rec.point} ${rec.result}${date ? ` ${date}` : ""} 저장됨`}>
+      {re && <em className="re">재</em>}
+      <b>{rec.point}</b>
+      {date ? <small className="when">{date}</small> : null}
+    </div>
+  );
+}
+
 function PointCard({ label, paintKey, date, state, caption, re, armed, onTap, onLong }: {
   label: string;
   paintKey: string;
@@ -772,7 +790,7 @@ function PointCard({ label, paintKey, date, state, caption, re, armed, onTap, on
   state: "pass" | "fail" | "draft" | "absent";
   caption: string;
   re: boolean;
-  armed: boolean;
+  armed?: boolean;
   onTap: () => void;
   onLong: (box: { top: number; left: number; width: number; height: number }) => void;
 }) {
@@ -816,16 +834,20 @@ function PointCard({ label, paintKey, date, state, caption, re, armed, onTap, on
   );
 }
 
+/** 'rec:' 카드 key 의 기록. 저장 안 한 기록만 — 탭·칠하기는 손을 뗀 뒤 최신 상태로 적용하므로 그 사이 저장된 기록도 건드리지 않는다. */
+function unsavedRecord(key: string): InspectionRecord | null {
+  return getState().records.find((item) => `rec:${item.id}` === key && !item.deleted && !isSaved(item)) ?? null;
+}
+
 export async function applyTap(key: string, taps: number): Promise<void> {
   if (key.startsWith("draft:")) {
     const target = { kind: "draft" as const, id: key.slice(6) };
     if (tapPhase("draft", taps) === "pass") await setEditResult(target, PASS);
     return;
   }
-  const id = key.slice(4);
-  const rec = getState().records.find((item) => item.id === id && !item.deleted);
+  const rec = unsavedRecord(key);
   if (!rec || rec.result === "없음") return;
-  if (tapPhase(rec.result === FAIL ? "fail" : "pass", taps) === "draft") await markEditGrey({ kind: "record", id });
+  if (tapPhase(rec.result === FAIL ? "fail" : "pass", taps) === "draft") await markEditGrey({ kind: "record", id: rec.id });
 }
 
 /** 손가락 아래의 카드. 터치는 처음 카드에 잡혀 있으므로 target 대신 좌표로 찾는다. */
@@ -834,24 +856,18 @@ function paintKeyAt(x: number, y: number): string | null {
   return node?.closest<HTMLElement>("[data-paint-key]")?.dataset.paintKey ?? null;
 }
 
-function paintInfo(key: string): { kind: "record" | "draft"; result?: string; reinspect?: boolean } {
-  const live = getState();
+function paintInfo(key: string): PaintCardInfo {
   if (key.startsWith("draft:")) {
-    const found = findDraftEntry(live.meta.draftCards, key.slice(6));
+    const found = findDraftEntry(getState().meta.draftCards, key.slice(6));
     return { kind: "draft", reinspect: !!found?.card.reinspectOf };
   }
-  const rec = live.records.find((item) => item.id === key.slice(4) && !item.deleted);
-  return { kind: "record", result: rec?.result ?? "없음" };
+  return { kind: "record", result: unsavedRecord(key)?.result ?? "없음" };
 }
 
 /** 칠하기 한 칸. 실제로 저장하기 직전에 최신 상태로 규칙을 다시 확인한다. S면 R 이 따라간다(savePoint/setResult). */
 export async function applyPaint(key: string, fromStart: boolean): Promise<void> {
-  if (paintAction(paintInfo(key), fromStart) === "skip") {
-    // 이미 합격(또는 지나가기만 한 불합격)인 S: S 는 그대로 두고 빠진 짝 R 만 만든다(S→R 자동).
-    if (key.startsWith("rec:")) await ensurePairR(key.slice(4));
-    return;
-  }
   if (key.startsWith("draft:")) {
+    if (paintAction(paintInfo(key), fromStart) === "skip") return;
     const id = key.slice(6);
     const found = findDraftEntry(getState().meta.draftCards, id);
     if (!found) return;
@@ -859,9 +875,15 @@ export async function applyPaint(key: string, fromStart: boolean): Promise<void>
     if (saved) await dropDraft(id);
     return;
   }
-  const id = key.slice(4);
-  await clearGreyReinspect(id);
-  await setResult(id, PASS);
+  const rec = unsavedRecord(key);
+  if (!rec) return;
+  if (paintAction({ kind: "record", result: rec.result }, fromStart) === "skip") {
+    // 이미 합격(또는 지나가기만 한 불합격)인 S: S 는 그대로 두고 빠진 짝 R 만 만든다(S→R 자동).
+    await ensurePairR(rec.id);
+    return;
+  }
+  await clearGreyReinspect(rec.id);
+  await setResult(rec.id, PASS);
 }
 
 async function markEditGrey(target: { kind: "record" | "draft"; id: string }) {
@@ -998,15 +1020,16 @@ function parentFail(records: InspectionRecord[], rec: InspectionRecord): Inspect
 }
 
 type Shown =
+  | { key: string; kind: "saved"; rec: InspectionRecord; re: boolean }
   | { key: string; kind: "record"; rec: InspectionRecord; re: boolean }
   | { key: string; kind: "draft"; draft: DraftCard };
 
 function layoutCards(records: InspectionRecord[], drafts: DraftCard[], direction: WalkDirection): Shown[] {
   const out: Shown[] = [
-    ...records.map((rec) => ({ key: `rec:${rec.id}`, kind: "record" as const, rec, re: !!parentFail(records, rec) })),
+    ...records.map((rec) => ({ key: `rec:${rec.id}`, kind: isSaved(rec) ? ("saved" as const) : ("record" as const), rec, re: !!parentFail(records, rec) })),
     ...drafts.map((draft) => ({ key: `draft:${draft.id}`, kind: "draft" as const, draft, re: !!draft.reinspectOf })),
   ];
-  return orderPointCards(out.map((card) => ({ ...card, point: card.kind === "record" ? card.rec.point : card.draft.point })), direction);
+  return orderPointCards(out.map((card) => ({ ...card, point: card.kind === "draft" ? card.draft.point : card.rec.point })), direction);
 }
 
 function walkTrail(records: InspectionRecord[]): number[] {

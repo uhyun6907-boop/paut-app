@@ -394,16 +394,25 @@ async function ensureListGm(client: GraphClient): Promise<string | null> {
       .filter((r) => !known.has(r.id));
     state.records = replaceListRecords("listGm", [...parsed, ...state.records.filter((r) => listBookOf(r) === "listGm" && r.src === "xlsx")], false);
     let config = mergeConfig(state.config, state.config.inspectors, {}, sitesOf(state.records));
-    if (got.file.id !== file.id || state.config.files.listGm === undefined) config = { ...config, files: { ...config.files, listGm: got.file } };
+    if (state.config.files.listGm === undefined) config = { ...config, files: { ...config.files, listGm: got.file } };
     state.config = config;
     patch({ records: [...state.records], config });
     await persistRecords();
     await persistConfig();
+    await rememberListFile("listGm", got.file);
     return null;
   } catch (error) {
     console.warn("군포·마전 리스트를 받지 못했습니다", error);
     return `${listLabel("listGm")}: 파일을 받지 못했습니다 — ${errorText(error)}`;
   }
+}
+
+/** 리스트 파일을 저장된 ID 로 못 찾아(404) 이름으로 다시 찾았으면 새 ID 를 설정에 남긴다. 다음부터 옛 ID 를 부르지 않는다. */
+export async function rememberListFile(book: ListBookKind, file: { id: string; name: string }): Promise<void> {
+  if (listFileOf(state.config, book)?.id === file.id) return;
+  state.config = { ...state.config, files: { ...state.config.files, [book]: file } };
+  patch({ config: state.config });
+  await persistConfig();
 }
 
 async function persistRecords(): Promise<void> {
@@ -623,6 +632,14 @@ function staffChanged(meta: DayMeta): boolean {
 }
 
 /**
+ * 저장된 기록: 엑셀에서 읽었거나 저장을 눌러 엑셀로 보낸(보내는 중인) 기록. 저장 뒤 고친 것이 없다.
+ * 입력 탭에서는 눌러도 바뀌지 않고, 리스트 탭에서 그 날짜 「수정」을 눌러야만 고친다.
+ */
+export function isSaved(rec: InspectionRecord): boolean {
+  return rec.sync !== "local";
+}
+
+/**
  * '저장 · 미저장 N' 의 N: 지금 현장(지난 날 카드 포함)에서 사용자가 고쳤지만 아직 저장하지 않은 기록(sync "local")만 센다.
  * 회색(미입력) 카드는 세지 않는다 — 날짜가 없는 자리 표시라 저장해도 엑셀에 쓰지 않고 지워지지도 않는다.
  */
@@ -730,6 +747,7 @@ async function runSync(options: SyncOptions, ctl: RunCtl): Promise<void> {
       if (client.authFailed) loginLost = true;
       deferSoftFailures(outcome);
       applyOutcome(pending, outcome);
+      for (const [book, file] of outcome.listFiles) await rememberListFile(book, file);
       if (loginLost) {
         freshTokenNext = true;
         patch({ loginNeeded: true });
@@ -824,7 +842,7 @@ function deferSoftSteps(steps: FileSteps | undefined): FileSteps | undefined {
  * 로그인이 끊겨(LoginRequiredError·새 토큰으로도 401) 또는 응답이 없어(시간 초과·중단) 실패한 단계는 실패가 아니라 대기다.
  * 다른 실패(409·412·423·400·네트워크 등)는 Graph 가 준 실제 이유 그대로 실패로 남긴다.
  */
-function deferSoftFailures(outcome: GraphSyncOutcome): void {
+function deferSoftFailures(outcome: Pick<GraphSyncOutcome, "steps" | "report">): void {
   for (const rec of state.records) rec.steps = deferSoftSteps(rec.steps);
   for (const [id, steps] of outcome.steps) outcome.steps.set(id, deferSoftSteps(steps) ?? {});
   for (const file of SYNC_FILES) {
@@ -843,7 +861,7 @@ function deferSoftFailures(outcome: GraphSyncOutcome): void {
 
 /** 저장된 지난 보고서의 로그인·시간 초과 실패 줄을 대기로 바꾼다(다시 켰을 때 옛 '만료' 문구가 남지 않게). */
 function sanitizeReport(report: SyncReport): void {
-  deferSoftFailures({ steps: new Map(), excelRows: new Map(), report, discovered: [] });
+  deferSoftFailures({ steps: new Map(), report });
 }
 
 function hasAnyFile(): boolean {
@@ -1519,6 +1537,56 @@ function withoutReinspect(parentId: string): { draftCards: Record<string, DraftC
 
 export function removeRecord(id: string, quiet = false): Promise<void> {
   return enqueue(() => removeRecordNow(id, quiet));
+}
+
+/** 리스트 탭 「리페어 처리」: 입력 탭 리페어 처리와 같다(불합격 · S면 짝 R 도 · 재검사 회색 카드). 저장까지 바로 한다. */
+export function repairSavedRecord(id: string): Promise<void> {
+  return commitListAction(id, async (rec) => {
+    await setResultNow(rec.id, FAIL);
+    addReinspectDraft(rec.id, canonicalPoint(rec.point) ?? rec.point, scopeOf(rec));
+  });
+}
+
+/** 리스트 탭 「삭제」: 그 기록 하나만 지운다. 엑셀은 행과 순번을 남기고 내용만 비운다. 저장까지 바로 한다. */
+export function deleteSavedRecord(id: string): Promise<void> {
+  return commitListAction(id, (rec) => {
+    markDeleted(rec);
+    dropReinspectOf(rec.id);
+  });
+}
+
+/** 리스트 탭에서 바꾼 기록(따라 바뀐 짝 R 포함)을 저장 버튼 없이 바로 엑셀 대기열에 넣는다. 초기화로 되돌아가지 않는다. */
+function commitListAction(id: string, change: (rec: InspectionRecord) => void | Promise<void>): Promise<void> {
+  return enqueue(async () => {
+    const rec = state.records.find((r) => r.id === id && !r.deleted);
+    if (!rec) return;
+    const unsavedBefore = new Set(state.records.filter((r) => r.sync === "local").map((r) => r.id));
+    const draftsBefore = state.meta.draftCards;
+    await change(rec);
+    for (const r of state.records) if (r.sync === "local" && (r.id === id || !unsavedBefore.has(r.id))) queueLocal(r);
+    state.meta = { ...state.meta, draftBaseline: carryDraftChanges(state.meta, draftsBefore, rec.site) };
+    patch({ records: [...state.records], meta: state.meta });
+    await persistRecords();
+    await persistMeta();
+    requestSync();
+  });
+}
+
+/** 저장해 둔 회색 카드 모습에 이번에 더하고 뺀 카드만 옮긴다(그 밖의 저장 안 한 회색 카드 변화는 그대로 미저장). */
+function carryDraftChanges(meta: DayMeta, before: DayMeta["draftCards"], site: string): DayMeta["draftBaseline"] {
+  const base = meta.draftBaseline?.[site];
+  if (!base) return meta.draftBaseline;
+  const old = siteDrafts(before, site);
+  const now = siteDrafts(meta.draftCards, site);
+  const ids = (lists: Record<string, DraftCard[]>) => new Set(Object.values(lists).flat().map((card) => card.id));
+  const oldIds = ids(old);
+  const nowIds = ids(now);
+  const next: Record<string, DraftCard[]> = {};
+  for (const key of new Set([...Object.keys(base), ...Object.keys(now)])) {
+    const list = [...(base[key] ?? []).filter((card) => !oldIds.has(card.id) || nowIds.has(card.id)), ...(now[key] ?? []).filter((card) => !oldIds.has(card.id))];
+    if (list.length) next[key] = structuredClone(list);
+  }
+  return { ...meta.draftBaseline, [site]: next };
 }
 
 async function removeRecordNow(id: string, quiet = false): Promise<void> {

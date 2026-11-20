@@ -30,6 +30,7 @@ vi.stubGlobal("localStorage", {
 import { FAIL, PASS, type InspectionRecord } from "../domain/types";
 import { kvGet } from "./db";
 import {
+  commitDay,
   getState,
   mirrorGreyDraft,
   noteDirectR,
@@ -280,17 +281,16 @@ describe("S→R 자동", () => {
     expect(today("R30")[0].result).toBe(FAIL);
   });
 
-  it("이미 합격인 S29~S31 인데 짝 R 이 없으면, 그 위를 칠하면 R29~R31 이 합격으로 생긴다(S 는 그대로, 다시 칠해도 중복 없음)", async () => {
+  it("저장 전 합격 S29~S31 인데 짝 R 이 없으면, 그 위를 칠하면 R29~R31 이 합격으로 생긴다(S 는 그대로, 다시 칠해도 중복 없음)", async () => {
     setSrMirrorEnabled(false);
     for (const point of ["S29", "S30", "S31"]) await savePoint(PASS, point);
     setSrMirrorEnabled(true);
-    for (const point of ["S29", "S30", "S31"]) today(point)[0].sync = "synced";
     expect(today("R29")).toHaveLength(0);
     const keys = ["S29", "S30", "S31"].map((p) => `rec:${today(p)[0].id}`);
     for (let pass = 0; pass < 2; pass++) {
       await drag(keys[0], keys.map((k, i) => [cx(i) + 14, k] as [number, string]));
     }
-    for (const point of ["S29", "S30", "S31"]) expect(today(point).map((r) => `${r.result}:${r.sync}`), point).toEqual([`${PASS}:synced`]);
+    for (const point of ["S29", "S30", "S31"]) expect(today(point).map((r) => `${r.result}:${r.sync}`), point).toEqual([`${PASS}:local`]);
     for (const point of ["R29", "R30", "R31"]) expect(today(point).map((r) => r.result), point).toEqual([PASS]);
     // 직접 고친 R 은 여전히 S 를 따라가지 않는다.
     await setResult(today("R30")[0].id, FAIL);
@@ -447,6 +447,31 @@ describe("S→R 자동", () => {
     await applyTap("draft:d-S90", 1);
     expect(today("S90").map((rec) => rec.result)).toEqual([PASS]);
     expect(today("R90").map((rec) => rec.result)).toEqual([PASS]);
+  });
+
+  it("저장 전 카드는 탭·칠하기가 그대로 되고, 저장한 뒤에는 같은 탭·칠하기가 아무것도 바꾸지 않는다", async () => {
+    const key = `${SITE}||${LINE}||S`;
+    await setLineDrafts(key, [{ id: "d-S40", point: "S40" }, { id: "d-S41", point: "S41" }]);
+    await applyTap("draft:d-S40", 1);
+    await applyPaint("draft:d-S41", true);
+    expect(today("S40").map((rec) => `${rec.result}:${rec.sync}`)).toEqual([`${PASS}:local`]);
+    expect(today("S41").map((rec) => `${rec.result}:${rec.sync}`)).toEqual([`${PASS}:local`]);
+    await applyTap(`rec:${today("S41")[0].id}`, 2);
+    await settled();
+    expect(today("S41")).toEqual([]);
+    expect(getState().meta.draftCards?.[key]?.map((card) => card.point)).toEqual(["S41"]);
+
+    await commitDay();
+    await settled();
+    const s40 = today("S40")[0];
+    expect(s40.sync).not.toBe("local");
+    const before = JSON.stringify(s40);
+    await applyTap(`rec:${s40.id}`, 1);
+    await applyTap(`rec:${s40.id}`, 2);
+    await applyPaint(`rec:${s40.id}`, true);
+    await settled();
+    expect(JSON.stringify(today("S40")[0])).toBe(before);
+    expect(today("R40").every((rec) => rec.sync !== "local")).toBe(true);
   });
 
   it("리페어 처리(편집 창): S 가 불합격이 되고 R 이 따라가며 재검사 회색 카드가 붙고, S 를 지우면 짝 R 도 지워진다", async () => {

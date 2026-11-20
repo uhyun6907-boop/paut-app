@@ -30,7 +30,7 @@ export const LIST_BOOK_LABEL: Record<ListBookKind, string> = {
 
 /** 군포·마전 리스트(OneDrive 드라이브 루트). 설정에서 다른 파일을 고르면 그 값이 우선. */
 export const LIST_GM_FILE = {
-  id: "73DF94A06E5230E0!sa2c63c1f3c464937afdfb19a02c526df",
+  id: "73DF94A06E5230E0!sb824baa8e2754d6b9cf87409b76546b5",
   name: "PAUT NDT 리스트(군포, 마전).xlsx",
 } as const;
 

@@ -1059,7 +1059,7 @@ describe("카드를 지우면 엑셀 세 파일에서 모두 빠진다", () => {
   });
 });
 
-describe("지성 마전 PA 003 S06·R06(엑셀 118·125행, 앱 ID 없음)을 잘못 눌러 회색으로 만든 뒤", () => {
+describe("지성 마전 PA 003 S06·R06(엑셀 118·125행, 앱 ID 없음) — 저장된 기록 보호", () => {
   const SITE = "지성 마전 PA";
   const LINE = "MJDH-D-D-P-58-003-200A";
   const S06 = `xlsx:${SITE}:118`;
@@ -1079,19 +1079,93 @@ describe("지성 마전 PA 003 S06·R06(엑셀 118·125행, 앱 ID 없음)을 �
   const gmWrites = () => drive.requests((e) => e.item === LIST_GM_ID && e.method !== "GET");
   const visible = (s: Session, id: string) => s.getState().records.some((r) => r.id === id && !r.deleted);
 
-  async function greyTapS06(s: Session): Promise<void> {
-    const ui = await import("../ui/EntryView");
-    await ui.applyTap(`rec:${S06}`, 1);
+  /** 저장 안 한 지움(예: 짝 S 를 회색으로 만들어 따라 지워진 R). 입력 탭 카드 탭으로는 더 생기지 않는다. */
+  async function deleteUnsavedS06(s: Session): Promise<void> {
+    await s.removeRecord(S06);
     await s.settled();
     expect(visible(s, S06)).toBe(false);
     expect(visible(s, R06)).toBe(false);
   }
 
+  function liveRow(row: number, cells: Record<string, string | number>): import("../excel/liveList").LiveRow {
+    return { row, cells: Object.entries(cells).map(([col, value]) => ({ address: `${col}${row}`, col, row, value, formula: false })) };
+  }
+
+  it("입력 탭에서 S06·R06 카드를 한 번·여러 번 누르거나 칠해도 바뀌지도 지워지지도 않는다(미저장 0, 엑셀 요청 없음)", async () => {
+    seedMajeon();
+    const before = [gmRow(118), gmRow(125)];
+    const s = await startApp();
+    const ui = await import("../ui/EntryView");
+    const snap = () => [S06, R06].map((id) => JSON.stringify(s.getState().records.find((r) => r.id === id)));
+    const saved = snap();
+    for (const id of [S06, R06]) {
+      await ui.applyTap(`rec:${id}`, 1);
+      await ui.applyTap(`rec:${id}`, 3);
+      await ui.applyPaint(`rec:${id}`, true);
+      await ui.applyPaint(`rec:${id}`, false);
+    }
+    await s.settled();
+    await s.syncIdle();
+    expect(snap()).toEqual(saved);
+    expect(s.unsavedCount()).toBe(0);
+    expect(s.resettableCount(s.getState().records, s.getState().meta)).toBe(0);
+    expect(gmWrites()).toHaveLength(0);
+    expect([gmRow(118), gmRow(125)]).toEqual(before);
+  });
+
+  it("리스트 탭 「삭제」: 확인을 취소하면 그대로, 확인하면 S06 기록만 지우고 엑셀 118행은 순번(A)만 남기고 비운다(R06 125행 그대로)", async () => {
+    seedMajeon();
+    const before125 = gmRow(125);
+    const seq118 = readSheet(drive.files(LIST_GM_ID), SITE).cells.get("A118")?.v;
+    const s = await startApp();
+    const list = await import("../ui/ListScreen");
+    const table = { book: "listGm" as const, sheetName: SITE };
+    const row = liveRow(118, { E: "2026-06-10", F: LINE, G: "S06", P: PASS });
+    const asked: string[] = [];
+
+    const cancelled = await list.applyRowAction("delete", table, row, (text) => (asked.push(text), false));
+    expect(cancelled.done).toBe(false);
+    expect(asked).toEqual(["S06 (26.06.10) 기록을 지울까요? 엑셀 행 내용이 지워집니다."]);
+    await s.settled();
+    await s.syncIdle();
+    expect(visible(s, S06)).toBe(true);
+    expect(gmWrites()).toHaveLength(0);
+
+    const done = await list.applyRowAction("delete", table, row, () => true);
+    expect(done.done).toBe(true);
+    await s.settled();
+    await s.syncIdle();
+    expect(visible(s, S06)).toBe(false);
+    expect(visible(s, R06)).toBe(true);
+    expect(s.unsavedCount()).toBe(0);
+    expect(s.resettableCount(s.getState().records, s.getState().meta)).toBe(0);
+    expect(gmRow(118)).toEqual({ E: "", F: "", G: "", P: "" });
+    expect(readSheet(drive.files(LIST_GM_ID), SITE).cells.get("A118")?.v).toBe(seq118);
+    expect(gmRow(125)).toEqual(before125);
+  });
+
+  it("리스트 탭 「리페어 처리」: 입력 탭과 같이 S06 불합격 + 짝 R06 도 불합격 + 재검사 카드, 저장 없이 엑셀까지", async () => {
+    seedMajeon();
+    const s = await startApp();
+    const list = await import("../ui/ListScreen");
+    const row = liveRow(118, { E: "2026-06-10", F: LINE, G: "S06", P: PASS });
+    const res = await list.applyRowAction("repair", { book: "listGm", sheetName: SITE }, row, () => true);
+    expect(res.done).toBe(true);
+    await s.settled();
+    await s.syncIdle();
+    expect(gmRow(118).P).toBe(FAIL);
+    expect(gmRow(125).P).toBe(FAIL);
+    const drafts = Object.values(s.getState().meta.draftCards ?? {}).flat();
+    expect(drafts.filter((card) => card.reinspectOf === S06).map((card) => card.point)).toEqual(["S06"]);
+    expect(s.unsavedCount()).toBe(0);
+    expect(s.resettableCount(s.getState().records, s.getState().meta)).toBe(0);
+  });
+
   it("다른 현장으로 옮긴 뒤 초기화해도 S06·R06 이 엑셀 모습으로 돌아오고 엑셀에는 아무것도 보내지 않는다", async () => {
     seedMajeon();
     const before = [gmRow(118), gmRow(125)];
     const s = await startApp();
-    await greyTapS06(s);
+    await deleteUnsavedS06(s);
     await s.selectSite("드림 합정주공");
 
     await s.resetUnsaved();
@@ -1115,7 +1189,7 @@ describe("지성 마전 PA 003 S06·R06(엑셀 118·125행, 앱 ID 없음)을 �
     seedMajeon();
     const before = [gmRow(118), gmRow(125)];
     const s = await startApp();
-    await greyTapS06(s);
+    await deleteUnsavedS06(s);
 
     const again = await startApp();
     expect(gmWrites()).toHaveLength(0);
@@ -1150,7 +1224,7 @@ describe("지성 마전 PA 003 S06·R06(엑셀 118·125행, 앱 ID 없음)을 �
   it("저장을 누르면 그때만 지움을 보낸다", async () => {
     seedMajeon();
     const s = await startApp();
-    await greyTapS06(s);
+    await deleteUnsavedS06(s);
     await s.commitDay();
     await s.syncIdle();
     expect(gmRow(118).P).toBe("");

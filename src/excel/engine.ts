@@ -354,6 +354,8 @@ export interface GraphSyncOutcome {
   report: SyncReport;
   /** 리스트에는 앱 ID 로 있는데 이 기기에 없던 기록 */
   discovered: InspectionRecord[];
+  /** 저장된 ID 가 404 라 이름으로 다시 찾은 리스트 파일. 설정에 남겨야 한다. */
+  listFiles: Map<ListBookKind, { id: string; name: string }>;
 }
 
 function needs(rec: InspectionRecord, file: SyncFile): boolean {
@@ -372,6 +374,7 @@ const BACKFILL_DAYS = 62;
 class Run {
   steps = new Map<string, FileSteps>();
   excelRows = new Map<string, number>();
+  listFiles = new Map<ListBookKind, { id: string; name: string }>();
   report: SyncReport;
   constructor(at: number) {
     this.report = {
@@ -432,13 +435,14 @@ export async function syncGraph(args: GraphSyncArgs): Promise<GraphSyncOutcome> 
 
   if (args.backfill && args.scanList) {
     for (const book of LIST_BOOKS) {
-      const file = listFileOf(args.config, book);
+      const file = run.listFiles.get(book) ?? listFileOf(args.config, book);
       if (!file?.id) continue;
       // 군포·마전은 그 파일의 기록이 이 기기에 있을 때만 받는다(아직 안 쓰면 요청하지 않음).
       if (book !== "list" && !all.some((r) => listBookOf(r) === book)) continue;
       try {
-        await args.client.refreshToken();
-        const files = unzipXlsx(await args.client.download(file.id));
+        const got = await downloadListBook(args.client, file);
+        if (got.file.id !== file.id) run.listFiles.set(book, got.file);
+        const files = unzipXlsx(got.bytes);
         const known = new Set([...all, ...discovered].map((r) => r.id));
         for (const site of parseListWorkbook(files, book)) {
           for (const rec of site.records) {
@@ -460,7 +464,7 @@ export async function syncGraph(args: GraphSyncArgs): Promise<GraphSyncOutcome> 
   if (listChecked) run.mark(candidates.filter((r) => !r.steps?.list && listChecked.present.has(r.id)), "list", "done");
   await iljiStep(args, run, jobs, candidates, all);
   await statementStep(args, run, jobs, candidates, all);
-  return { steps: run.steps, excelRows: run.excelRows, report: run.report, discovered };
+  return { steps: run.steps, excelRows: run.excelRows, report: run.report, discovered, listFiles: run.listFiles };
 }
 
 /**
@@ -531,8 +535,8 @@ async function listBookStep(
   recs: InspectionRecord[],
   verify: InspectionRecord[],
 ): Promise<ListCheck | null> {
-  const itemId = listFileOf(args.config, book)?.id;
-  if (!itemId) {
+  const file = listFileOf(args.config, book);
+  if (!file?.id) {
     if (recs.length) run.listFail(book, recs, new Error(`설정에서 ${listLabel(book)} 파일을 고르세요.`));
     return null;
   }
@@ -544,7 +548,9 @@ async function listBookStep(
   try {
     // 파일마다 새 토큰(중간 만료 방지).
     await args.client.refreshToken();
-    wb = await openListWorkbook(args.client, itemId, listFileOf(args.config, book)?.name);
+    const opened = await openListWorkbook(args.client, file);
+    wb = opened.wb;
+    if (opened.file.id !== file.id) run.listFiles.set(book, opened.file);
     const bySheet = new Map<string, InspectionRecord[]>();
     const verifyBySheet = new Map<string, InspectionRecord[]>();
     for (const rec of recs) {
@@ -710,14 +716,14 @@ function rowKey(date: unknown, line: unknown, point: unknown): string | null {
 }
 
 /** 리스트 통합 문서 세션. 저장된 항목 ID 가 404 면 드라이브 루트에서 같은 이름의 파일을 찾아 연다. */
-async function openListWorkbook(client: GraphClient, itemId: string, name?: string): Promise<WorkbookSession> {
+async function openListWorkbook(client: GraphClient, file: { id: string; name: string }): Promise<{ wb: WorkbookSession; file: { id: string; name: string } }> {
   try {
-    return await client.openWorkbook(itemId);
+    return { wb: await client.openWorkbook(file.id), file };
   } catch (error) {
-    if (!(error instanceof GraphError) || error.status !== 404 || !name) throw error;
-    const found = await client.findRootFile(name);
+    if (!(error instanceof GraphError) || error.status !== 404 || !file.name) throw error;
+    const found = await client.findRootFile(file.name);
     if (!found) throw error;
-    return client.openWorkbook(found.id);
+    return { wb: await client.openWorkbook(found.id), file: { id: found.id, name: found.name } };
   }
 }
 
