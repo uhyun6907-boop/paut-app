@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { isRemovedSite } from "../domain/mapping";
 import { LIST_BOOK_LABEL } from "../domain/types";
-import { cellText, isEditable, liveTarget, loadLiveList, matchRecord, recordPatch, writeLiveCell, LiveConflictError, type LiveCell, type LiveRow, type LiveTable } from "../excel/liveList";
+import { cellText, isDateCol, isEditable, liveTarget, loadLiveList, matchRecord, recordPatch, writeLiveCell, writeLiveCells, LiveConflictError, type LiveCell, type LiveCellsResult, type LiveRow, type LiveTable } from "../excel/liveList";
 import { fileOf } from "../excel/engine";
 import { CACHE_STALE_TEXT, REFRESHING_TEXT, openList, saveListCache, savedAtText, type CacheSlot, type ListView } from "./listLoad";
 import { FilterPanel, FilterBar } from "./ListFilterPanel";
@@ -17,7 +17,8 @@ function readMode(): ColumnMode {
   }
 }
 import {
-  applyListCellEdit,
+  applyListCellEdits,
+  dayStaffOn,
   deleteSavedRecord,
   getState,
   graphReadOk,
@@ -25,10 +26,12 @@ import {
   pullFromList,
   rememberFile,
   repairSavedRecord,
+  setDayStaff,
   settled,
   signIn,
   syncIdle,
   useSession,
+  type StaffEdit,
 } from "../store/session";
 import { FAIL, type InspectionRecord } from "../domain/types";
 import { GRAPH_TIMEOUT_TEXT, GraphError, type GraphClient } from "../sync/graph";
@@ -125,18 +128,135 @@ export function sentNote(action: RowAction, row: LiveRow, rec: InspectionRecord 
   return !rec || rec.steps?.list?.status === "done" ? `${head} · 검사리스트에 반영됨` : `${head} · 엑셀에 아직 못 보냄(위 동기화 상태를 확인하세요)`;
 }
 
+export const moveDateConfirmText = (group: DateGroup, date: string) => `${dotDate(group.date)} 의 ${group.rows.length}행을 ${dotDate(date)} 로 바꿀까요?`;
+
+function failedRowsText(failed: LiveCellsResult["failed"]): string {
+  const byReason = new Map<string, number[]>();
+  for (const { cell, error } of failed) {
+    const reason = error instanceof LiveConflictError ? "다른 곳에서 바뀜" : listErrorText(error);
+    byReason.set(reason, [...(byReason.get(reason) ?? []), cell.row]);
+  }
+  return [...byReason].map(([reason, rows]) => `${rows.map((r) => `${r}행`).join(", ")} (${reason})`).join(" · ");
+}
+
+/**
+ * 「수정」 중인 날짜 묶음의 모든 행 E(검사 날짜)를 새 날짜로. 확인을 받은 뒤에만 쓰고, 이어진 행은 PATCH 한 번으로 묶는다.
+ * 쓴 행과 맞는 앱 기록(카드)의 날짜도 바꾼다. 일부만 실패하면 실패한 행과 이유를 note 에 적는다.
+ */
+export async function moveDateGroup(
+  client: GraphClient,
+  table: LiveTable,
+  group: DateGroup,
+  date: string,
+  confirm: (text: string) => boolean,
+  onProgress?: (done: number, total: number) => void,
+): Promise<{ done: false; note: string } | { done: true; note: string; rows: Set<number> }> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date === group.date) return { done: false, note: "" };
+  if (!confirm(moveDateConfirmText(group, date))) return { done: false, note: "" };
+  const records = getState().records;
+  const recs = new Map(group.rows.map((row) => [row.row, matchRecord(records, table, row)]));
+  const cells = group.rows.map((row) => row.cells.find((c) => c.col === "E")!);
+  const locked = cells.filter((c) => !isEditable(c));
+  const res = await writeLiveCells(client, table, cells.filter(isEditable), date, onProgress);
+  res.failed.push(...locked.map((cell) => ({ cell, error: new Error("수식 칸은 고치지 않습니다.") })));
+  const fields = recordPatch("E", res.value);
+  const edits = fields ? res.written.flatMap((c) => (recs.get(c.row) ? [{ id: recs.get(c.row)!.id, fields }] : [])) : [];
+  await applyListCellEdits(edits);
+  const head = `${dotDate(group.date)} → ${dotDate(date)} · ${res.written.length}행 바꿈 · 카드 ${edits.length}개 고침`;
+  return { done: true, note: res.failed.length ? `${head} · 실패 ${res.failed.length}행: ${failedRowsText(res.failed)}` : head, rows: new Set(res.written.map((c) => c.row)) };
+}
+
+export function staffText(staff: StaffEdit): string {
+  const names = [staff.insp1, staff.insp2].filter(Boolean).join(" · ") || "검사자 없음";
+  const span = staff.timeStart || staff.timeEnd ? `${staff.timeStart || "-"}–${staff.timeEnd || "-"}` : "시간 모름";
+  return `${names} · ${span}`;
+}
+
+export const staffConfirmText = (date: string, staff: StaffEdit) =>
+  `${dotDate(date)} 검사자·검사시간을 ${staffText(staff)} 로 바꿀까요? 작업일지(PAUT FIELD) 그날 행에 보냅니다.`;
+
+/**
+ * 「수정」 중인 날짜의 검사자·검사시간. 검사리스트에는 이 칸이 없어 작업일지 그날 행에 쓴다(저장과 같은 동기화).
+ * 그날 행과 맞는 앱 기록이 실어 간다 — 맞는 기록이 없으면 보내지 않는다.
+ */
+export async function applyDayStaff(
+  table: Pick<LiveTable, "book" | "sheetName">,
+  group: DateGroup,
+  staff: StaffEdit,
+  confirm: (text: string) => boolean,
+): Promise<{ done: false; note: string } | { done: true; note: string; ids: string[] }> {
+  const records = getState().records;
+  const ids = [...new Set(group.rows.flatMap((row) => matchRecord(records, table, row)?.id ?? []))];
+  const none = `${dotDate(group.date)}: 이 날짜 행과 맞는 앱 기록이 없어 작업일지에 보낼 수 없습니다. '새로 불러오기' 뒤 다시 하세요.`;
+  if (!ids.length) return { done: false, note: none };
+  if (!confirm(staffConfirmText(group.date, staff))) return { done: false, note: "" };
+  if (!(await setDayStaff(group.date, staff, ids))) return { done: false, note: none };
+  return { done: true, note: `${dotDate(group.date)} 검사자·검사시간 · 작업일지에 보내는 중`, ids };
+}
+
+export function staffSentNote(date: string, recs: InspectionRecord[]): string {
+  const head = `${dotDate(date)} 검사자·검사시간`;
+  return recs.length && recs.every((r) => r.steps?.ilji?.status === "done") ? `${head} · 작업일지에 반영됨` : `${head} · 작업일지에 아직 못 보냄(위 동기화 상태를 확인하세요)`;
+}
+
+function DayPanel(props: {
+  group: DateGroup;
+  staff: StaffEdit;
+  busy: boolean;
+  onMoveDate: (group: DateGroup, date: string) => void;
+  onStaff: (group: DateGroup, staff: StaffEdit) => void;
+}) {
+  const { group, busy, onMoveDate, onStaff } = props;
+  const [date, setDate] = useState(group.date);
+  const [staff, setStaff] = useState(props.staff);
+  const field = (key: keyof StaffEdit, label: string, type: "text" | "time") => (
+    <label className="dp-f">
+      <span>{label}</span>
+      <input className="field-input" type={type} value={staff[key]} aria-label={`${label} (그날)`} onChange={(e) => setStaff({ ...staff, [key]: e.target.value })} />
+    </label>
+  );
+  return (
+    <div className="dp">
+      <div className="dp-title">그날 {group.rows.length}행 한꺼번에</div>
+      <div className="dp-row">
+        <label className="dp-f wide">
+          <span>검사 날짜(E)</span>
+          <input className="field-input" type="date" value={date} aria-label="검사 날짜 (그날 모든 행)" onChange={(e) => setDate(e.target.value)} />
+        </label>
+        <button className="btn small primary" type="button" disabled={busy || !date || date === group.date} onClick={() => onMoveDate(group, date)}>날짜 바꾸기</button>
+      </div>
+      <div className="dp-grid">
+        {field("insp1", "검사자 1", "text")}
+        {field("insp2", "검사자 2", "text")}
+        {field("timeStart", "시작", "time")}
+        {field("timeEnd", "종료", "time")}
+      </div>
+      <div className="dp-row">
+        <span className="dp-hint">검사자·검사시간은 리스트에 칸이 없어 작업일지에 씁니다(동기화)</span>
+        <button className="btn small primary" type="button" disabled={busy} onClick={() => onStaff(group, staff)}>작업일지에 저장</button>
+      </div>
+    </div>
+  );
+}
+
 /** 「수정」 중 연 행의 칸들(보이는 열)과 리페어 처리·삭제. 고칠 수 있는 칸만 눌린다. */
 function RowEditor(props: {
   row: LiveRow;
   cols: { col: string; title: string }[];
   record: InspectionRecord | null;
+  staff: StaffEdit;
   editing: string | null;
   onCell: (cell: LiveCell) => void;
   onAction: (action: RowAction, row: LiveRow) => void;
 }) {
-  const { row, cols, record, editing, onCell, onAction } = props;
+  const { row, cols, record, staff, editing, onCell, onAction } = props;
   return (
     <div className="dr-edit">
+      <div className="dr-staff">
+        <span className="lc-k">검사자 · 검사시간</span>
+        <span className="lc-v">{staffText(staff)}</span>
+        <small>그날 값 · 위 「그날 한꺼번에」에서 고침(작업일지)</small>
+      </div>
       <div className="dr-cells">
         {cols.map(({ col, title }) => {
           const cell = row.cells.find((c) => c.col === col);
@@ -198,15 +318,19 @@ export function DateSummaryCard(props: {
   busy: boolean;
   editing: LiveCell | null;
   recordOf: (row: LiveRow) => InspectionRecord | null;
+  staffOf: (date: string) => StaffEdit;
   onDate: (date: string) => void;
   onEditing: () => void;
   onRow: (row: number) => void;
   onCell: (cell: LiveCell) => void;
   onAction: (action: RowAction, row: LiveRow) => void;
+  onMoveDate: (group: DateGroup, date: string) => void;
+  onStaff: (group: DateGroup, staff: StaffEdit) => void;
 }) {
-  const { group, focus, cols, busy, editing, recordOf, onDate, onEditing, onRow, onCell, onAction } = props;
+  const { group, focus, cols, busy, editing, recordOf, staffOf, onDate, onEditing, onRow, onCell, onAction, onMoveDate, onStaff } = props;
   const open = focus?.date === group.date;
   const unlocked = open && focus.editing;
+  const staff = unlocked && group.date ? staffOf(group.date) : null;
   return (
     <section className={`ds${open ? " open" : ""}${unlocked ? " unlocked" : ""}`}>
       <button type="button" className="ds-head" aria-expanded={open} onClick={() => onDate(group.date)}>
@@ -227,6 +351,7 @@ export function DateSummaryCard(props: {
               {unlocked ? "완료" : "수정"}
             </button>
           </div>
+          {unlocked && staff && <DayPanel key={group.date} group={group} staff={staff} busy={busy} onMoveDate={onMoveDate} onStaff={onStaff} />}
           <div className="ds-rows">
             {group.rows.map((row) => {
               const rowOpen = unlocked && focus.row === row.row;
@@ -246,6 +371,7 @@ export function DateSummaryCard(props: {
                       row={row}
                       cols={cols}
                       record={recordOf(row)}
+                      staff={staff ?? { insp1: "", insp2: "", timeStart: "", timeEnd: "" }}
                       editing={editing && editing.row === row.row ? editing.address : null}
                       onCell={onCell}
                       onAction={onAction}
@@ -384,6 +510,23 @@ export function ListScreen() {
     }
   }
 
+  function showEdited(table: LiveTable, rows: Set<number>): void {
+    const current = viewRef.current;
+    if (current.status !== "ok") return;
+    const next: LiveTable = { ...table, rows: table.rows.map((r) => (rows.has(r.row) ? { ...r, cells: [...r.cells] } : r)) };
+    const wasRefreshing = current.refreshing;
+    if (wasRefreshing) {
+      loadNo.current += 1;
+      clientRef.current?.abort();
+      clientRef.current = null;
+    }
+    const shown = { ...current, table: next, refreshing: false };
+    setView(shown);
+    viewRef.current = shown;
+    if (slot) void saveListCache(slot, next);
+    if (wasRefreshing) void load(true);
+  }
+
   async function save(): Promise<void> {
     if (!edit || view.status !== "ok" || busy) return;
     const { client, reason } = liveListClient();
@@ -405,25 +548,55 @@ export function ListScreen() {
       const rec = matchRecord(getState().records, table, structuredClone(row));
       const written = await writeLiveCell(client, table, cell, edit.text);
       const fields = recordPatch(cell.col, written);
-      if (rec && fields) await applyListCellEdit(rec.id, fields);
+      if (rec && fields) await applyListCellEdits([{ id: rec.id, fields }]);
       setNote(`${cell.address} 저장됨${rec && fields ? ` · 입력 탭 카드도 고침${fields.date ? ` (${fields.date})` : ""}` : ""}`);
       setEdit(null);
-      // 고친 행만 새 객체로(그 행만 다시 그린다). 캐시도 고친 값으로.
-      const next: LiveTable = { ...table, rows: table.rows.map((r) => (r === row ? { ...row, cells: [...row.cells] } : r)) };
-      const wasRefreshing = view.refreshing;
-      if (wasRefreshing) {
-        // 뒤에서 읽던 결과는 고치기 전 값일 수 있다: 버리고 고친 표 위에서 다시 읽는다.
-        loadNo.current += 1;
-        clientRef.current?.abort();
-        clientRef.current = null;
-      }
-      setView({ ...view, table: next, refreshing: false });
-      viewRef.current = { ...view, table: next, refreshing: false };
-      if (slot) void saveListCache(slot, next);
-      if (wasRefreshing) void load(true);
+      showEdited(table, new Set([row.row]));
+      if (cell.col === "E" && cellText(cell)) setFocus({ date: cellText(cell), editing: true, row: row.row });
     } catch (error) {
       setNote(error instanceof LiveConflictError ? error.message : listErrorText(error));
       if (error instanceof LiveConflictError) void load(true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function moveDate(group: DateGroup, date: string): Promise<void> {
+    if (view.status !== "ok" || busy) return;
+    const { client, reason } = liveListClient();
+    if (!client) {
+      setNote(reason);
+      return;
+    }
+    setEdit(null);
+    setBusy(true);
+    try {
+      const table = view.table;
+      const res = await moveDateGroup(client, table, group, date, (text) => window.confirm(text), (done, total) =>
+        setNote(`${dotDate(group.date)} → ${dotDate(date)} 바꾸는 중… ${done}/${total}행`),
+      );
+      setNote(res.note);
+      if (!res.done) return;
+      showEdited(table, res.rows);
+      if (res.rows.size) setFocus({ date, editing: true, row: null });
+    } catch (error) {
+      setNote(listErrorText(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveStaff(group: DateGroup, staff: StaffEdit): Promise<void> {
+    if (view.status !== "ok" || busy) return;
+    setEdit(null);
+    setBusy(true);
+    try {
+      const res = await applyDayStaff(view.table, group, staff, (text) => window.confirm(text));
+      setNote(res.note);
+      if (!res.done) return;
+      await settled();
+      await syncIdle();
+      setNote(staffSentNote(group.date, getState().records.filter((r) => res.ids.includes(r.id))));
     } finally {
       setBusy(false);
     }
@@ -438,6 +611,12 @@ export function ListScreen() {
   const actRef = useRef(act);
   actRef.current = act;
   const onAction = useMemo(() => (action: RowAction, row: LiveRow) => void actRef.current(action, row), []);
+  const moveRef = useRef(moveDate);
+  moveRef.current = moveDate;
+  const onMoveDate = useMemo(() => (group: DateGroup, date: string) => void moveRef.current(group, date), []);
+  const staffRef = useRef(saveStaff);
+  staffRef.current = saveStaff;
+  const onStaff = useMemo(() => (group: DateGroup, staff: StaffEdit) => void staffRef.current(group, staff), []);
   const loginStale = view.status === "ok" && view.staleError === LIST_LOGIN_TEXT;
 
   return (
@@ -488,6 +667,7 @@ export function ListScreen() {
           <input
             className="field-input"
             autoFocus
+            type={isDateCol(edit.cell.col) ? "date" : "text"}
             value={edit.text}
             aria-label={`${edit.cell.address} 값`}
             onChange={(e) => setEdit({ ...edit, text: e.target.value })}
@@ -555,11 +735,14 @@ export function ListScreen() {
                       busy={busy}
                       editing={edit?.cell ?? null}
                       recordOf={recordOf}
+                      staffOf={dayStaffOn}
                       onDate={(date) => refocus((f) => toggleDate(f, date))}
                       onEditing={() => refocus(toggleEditing)}
                       onRow={(row) => refocus((f) => toggleRow(f, row))}
                       onCell={onCell}
                       onAction={onAction}
+                      onMoveDate={onMoveDate}
+                      onStaff={onStaff}
                     />
                   ))}
                 </div>

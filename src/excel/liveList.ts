@@ -107,6 +107,10 @@ export function cellText(cell: Pick<LiveCell, "col" | "value">): string {
   return String(v);
 }
 
+export function isDateCol(col: string): boolean {
+  return DATE_COLS.has(col);
+}
+
 export function isEditable(cell: Pick<LiveCell, "col" | "row" | "formula">): boolean {
   return !cell.formula && !LOCKED_COLS.has(cell.col) && cell.row >= LIVE_FIRST_DATA_ROW;
 }
@@ -232,6 +236,37 @@ export class LiveConflictError extends Error {
   }
 }
 
+function storedValue(value: GraphCell): GraphCell {
+  return typeof value === "string" && value.startsWith("'") ? value.slice(1) : value;
+}
+
+async function writeRun(client: GraphClient, table: LiveTable, run: LiveCell[], value: GraphCell): Promise<void> {
+  const address = run.length === 1 ? run[0].address : `${run[0].address}:${run[run.length - 1].address}`;
+  const check = async () => {
+    const now = await client.readRange(table.itemId, table.sheetId, address);
+    run.forEach((cell, i) => {
+      const current = now[i]?.[0] ?? "";
+      if (!same(current, cell.value)) throw new LiveConflictError(current);
+    });
+  };
+  const values = run.map(() => [value]);
+  await check();
+  try {
+    await client.patchValues(table.itemId, table.sheetId, address, values, table.eTag);
+  } catch (error) {
+    if (!(error instanceof GraphError) || error.status !== 412) throw error;
+    await check();
+    table.eTag = (await client.itemMeta(table.itemId)).eTag;
+    await client.patchValues(table.itemId, table.sheetId, address, values, table.eTag);
+  }
+  for (const cell of run) cell.value = storedValue(value);
+  try {
+    table.eTag = (await client.itemMeta(table.itemId)).eTag;
+  } catch {
+    /* 다음 쓰기 때 412 면 다시 받는다 */
+  }
+}
+
 /**
  * 칸 하나만 쓴다. 쓰기 전에 그 칸을 다시 읽어 불러온 값과 같은지 확인하고, PATCH 에 If-Match 를 건다.
  * 412(파일 eTag 가 바뀜)인데 그 칸은 그대로면 eTag 를 새로 받아 한 번만 다시 보낸다.
@@ -240,26 +275,62 @@ export class LiveConflictError extends Error {
 export async function writeLiveCell(client: GraphClient, table: LiveTable, cell: LiveCell, text: string): Promise<GraphCell> {
   if (!isEditable(cell)) throw new Error(cell.formula ? "수식 칸은 고치지 않습니다." : "이 칸은 고칠 수 없습니다.");
   const value = toCellValue(cell.col, text, cell.value);
-  const check = async () => {
-    const now = (await client.readRange(table.itemId, table.sheetId, cell.address))[0]?.[0] ?? "";
-    if (!same(now, cell.value)) throw new LiveConflictError(now);
-  };
-  await check();
-  try {
-    await client.patchValues(table.itemId, table.sheetId, cell.address, [[value]], table.eTag);
-  } catch (error) {
-    if (!(error instanceof GraphError) || error.status !== 412) throw error;
-    await check();
-    table.eTag = (await client.itemMeta(table.itemId)).eTag;
-    await client.patchValues(table.itemId, table.sheetId, cell.address, [[value]], table.eTag);
-  }
-  cell.value = typeof value === "string" && value.startsWith("'") ? value.slice(1) : value;
-  try {
-    table.eTag = (await client.itemMeta(table.itemId)).eTag;
-  } catch {
-    /* 다음 쓰기 때 412 면 다시 받는다 */
-  }
+  await writeRun(client, table, [cell], value);
   return value;
+}
+
+export interface LiveCellsResult {
+  value: GraphCell;
+  written: LiveCell[];
+  failed: { cell: LiveCell; error: unknown }[];
+}
+
+/**
+ * 같은 열의 여러 칸에 같은 글자를 쓴다(예: 한 날짜의 모든 행 E). 이어진 행은 PATCH 한 번으로 묶는다.
+ * 묶음 안 어느 칸이 다른 곳에서 바뀌었으면 그 묶음만 칸 하나씩 다시 써서 바뀐 칸만 실패로 남긴다.
+ * 로그인·연결 오류처럼 칸과 상관없는 오류면 남은 칸을 모두 그 오류로 실패 처리하고 멈춘다.
+ */
+export async function writeLiveCells(
+  client: GraphClient,
+  table: LiveTable,
+  cells: LiveCell[],
+  text: string,
+  onProgress?: (done: number, total: number) => void,
+): Promise<LiveCellsResult> {
+  const col = cells[0]?.col ?? "";
+  if (cells.some((c) => c.col !== col || !isEditable(c))) throw new Error("같은 열의 고칠 수 있는 칸만 한꺼번에 씁니다.");
+  const value = toCellValue(col, text, cells[0]?.value ?? "");
+  const sorted = [...cells].sort((a, b) => a.row - b.row);
+  const runs: LiveCell[][] = [];
+  for (const cell of sorted) {
+    const last = runs.at(-1);
+    if (last && last[last.length - 1].row + 1 === cell.row) last.push(cell);
+    else runs.push([cell]);
+  }
+  const result: LiveCellsResult = { value, written: [], failed: [] };
+  const report = () => onProgress?.(result.written.length + result.failed.length, cells.length);
+  for (const [i, run] of runs.entries()) {
+    try {
+      await writeRun(client, table, run, value);
+      result.written.push(...run);
+    } catch (error) {
+      if (!(error instanceof LiveConflictError)) {
+        for (const cell of runs.slice(i).flat()) result.failed.push({ cell, error });
+        report();
+        return result;
+      }
+      for (const cell of run) {
+        try {
+          await writeRun(client, table, [cell], value);
+          result.written.push(cell);
+        } catch (one) {
+          result.failed.push({ cell, error: one });
+        }
+      }
+    }
+    report();
+  }
+  return result;
 }
 
 /** 열 → 앱 기록 필드. 없으면 앱 기록에는 해당 칸이 없다(순번 등). */
@@ -331,7 +402,7 @@ export function normalizeResult(text: string): string {
 export function recordPatch(col: string, value: GraphCell): Partial<InspectionRecord> | null {
   const field = FIELD_OF[col];
   if (!field) return null;
-  const raw = typeof value === "string" && value.startsWith("'") ? value.slice(1) : value;
+  const raw = storedValue(value);
   let text = raw === null || raw === undefined ? "" : String(raw);
   if (DATE_COLS.has(col) && typeof raw === "number") text = excelSerialToISO(raw);
   if (col === "L") text = text.toUpperCase();

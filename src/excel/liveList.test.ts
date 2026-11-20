@@ -23,7 +23,7 @@ import type { FakeDrive } from "../test/fakeGraph";
 import { LIST_GM_ID, LIST_ID, graphConfig, realDrive, realGmRecords, realListRecords } from "../test/realBooks";
 import { cellText, isEditable, normalizeResult, sortBySeq, type LiveRow, liveTarget, loadLiveList, matchRecord, recordPatch, writeLiveCell, LiveConflictError, type LiveTable } from "./liveList";
 import { readSheet, workbookSheets } from "./ooxml";
-import { applyListCellEdit, getState, liveListClient } from "../store/session";
+import { applyListCellEdits, getState, liveListClient } from "../store/session";
 import { LIST_LOGIN_TEXT, LIST_TIMEOUT_TEXT, listErrorText, readLiveList } from "../ui/ListScreen";
 import { AuthExpiredError, getAuthState, inflightCount, markExpired, resetAuthForTests } from "../sync/authState";
 import { LoginRequiredError } from "../sync/msal";
@@ -92,7 +92,7 @@ describe("리스트 탭 · OneDrive 검사리스트 바로 보기·고치기", (
     expect(cells.get(`Q${app.excelRow}`)?.v).toBe("SLAG");
     expect(cells.get(`S${app.excelRow}`)?.v ?? "").not.toContain("앱");
 
-    await applyListCellEdit(rec.id, recordPatch("Q", written)!);
+    await applyListCellEdits([{ id: rec.id, fields: recordPatch("Q", written)! }]);
     const after = getState().records.find((r) => r.id === app.id)!;
     expect(after.flawType).toBe("SLAG");
     expect(after.sync).toBe(rec.sync); // 엑셀은 이미 그 값: 다시 보내지 않음
@@ -223,7 +223,7 @@ describe("리스트 탭 · 엑셀 순번(A열) 순서 · 1번 탭 카드 즉시 
       expect(rec.id).toBe(app.id);
       const cell = row.cells.find((c) => c.col === col)!;
       const written = await writeLiveCell(client(), table, cell, text);
-      await applyListCellEdit(rec.id, recordPatch(col, written)!);
+      await applyListCellEdits([{ id: rec.id, fields: recordPatch(col, written)! }]);
       return getState().records.find((r) => r.id === app.id)!;
     };
     const before = getState().records;

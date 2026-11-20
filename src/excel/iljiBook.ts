@@ -290,7 +290,7 @@ export function applyIljiDay(files: ZipFiles, update: IljiUpdate): number {
 }
 
 /** 토·일은 공휴일, 나머지는 평일. 사용자가 고른 값이 있으면 그 값을 쓴다. */
-function defaultDayType(iso: string): string {
+export function defaultDayType(iso: string): "평일" | "공휴일" {
   const [y, m, d] = iso.split("-").map(Number);
   const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
   return dow === 0 || dow === 6 ? "공휴일" : "평일";

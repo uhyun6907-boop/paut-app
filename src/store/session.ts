@@ -5,7 +5,7 @@ import { canonicalPoint, fmtPoint, mirrorPoint, parsePoint } from "../domain/poi
 import { normalizeResult, recordPatch, type LiveTable } from "../excel/liveList";
 import { diameterFromLine } from "../domain/size";
 import { todayISO } from "../domain/dates";
-import type { AppConfig, DayMeta, DraftCard, DriveFile, FileSteps, InspectionRecord, ListBookKind, ResultKind, SiteMapping, SyncFile, SyncReport } from "../domain/types";
+import type { AppConfig, DayMeta, DayStaff, DraftCard, DriveFile, FileSteps, InspectionRecord, ListBookKind, ResultKind, SiteMapping, SyncFile, SyncReport } from "../domain/types";
 import { FAIL, PASS, SYNC_FILES, SYNC_FILE_LABEL } from "../domain/types";
 import {
   bootstrapFromSamples,
@@ -16,6 +16,7 @@ import {
   listRecordsOnDevice,
   inspectorsOnDate,
   fileOf,
+  workLogByDate,
   listLabel,
   rememberBaseline,
   rememberWork,
@@ -36,6 +37,7 @@ import { getAuthState, isLoginError, isLoginFailureText as authLoginText, onAuth
 import { ABORTED_TEXT, isTimeoutLike, TOKEN_TIMEOUT_TEXT } from "../sync/timeout";
 import { listBookOf, parseListWorkbook, rerouteGmRecords } from "../excel/listBook";
 import { unzipXlsx } from "../excel/ooxml";
+import { defaultDayType } from "../excel/iljiBook";
 import { kvGet, kvSet } from "./db";
 import { aggregateSteps } from "./syncStatus";
 
@@ -1996,21 +1998,73 @@ export function graphReadOk(): void {
 }
 
 /**
- * 리스트 탭에서 엑셀 칸을 고친 뒤, 같은 앱 기록의 그 필드만 맞춘다. 엑셀은 이미 그 값이므로 다시 보내지 않는다(대기 상태 그대로).
+ * 리스트 탭에서 엑셀 칸을 고친 뒤, 같은 앱 기록들의 그 필드만 맞춘다. 엑셀은 이미 그 값이므로 다시 보내지 않는다(대기 상태 그대로).
  */
-export function applyListCellEdit(recordId: string, fields: Partial<InspectionRecord>): Promise<void> {
+export function applyListCellEdits(edits: { id: string; fields: Partial<InspectionRecord> }[]): Promise<void> {
   return enqueue(async () => {
-    const at = state.records.findIndex((r) => r.id === recordId && !r.deleted);
-    if (at < 0) return;
-    const next: Partial<InspectionRecord> = { ...fields };
-    if (next.result !== undefined) next.result = normalizeResult(String(next.result));
-    if (next.point !== undefined) next.point = canonicalPoint(next.point) ?? next.point.trim().toUpperCase();
-    if (next.date !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(next.date)) delete next.date;
-    // 새 객체로 바꿔 1번 탭 카드(입력·오늘)가 다시 그려지게 한다. 날짜가 바뀌면 같은 기록이 새 날짜로 옮겨 간다(복제 없음).
-    const rec = { ...state.records[at], ...next };
-    state.records[at] = rec;
+    let changed = false;
+    for (const { id, fields } of edits) {
+      const at = state.records.findIndex((r) => r.id === id && !r.deleted);
+      if (at < 0) continue;
+      const next: Partial<InspectionRecord> = { ...fields };
+      if (next.result !== undefined) next.result = normalizeResult(String(next.result));
+      if (next.point !== undefined) next.point = canonicalPoint(next.point) ?? next.point.trim().toUpperCase();
+      if (next.date !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(next.date)) delete next.date;
+      state.records[at] = { ...state.records[at], ...next };
+      changed = true;
+    }
+    if (!changed) return;
     patch({ records: [...state.records] });
     await persistRecords();
+  });
+}
+
+export type StaffEdit = Pick<DayStaff, "insp1" | "insp2" | "timeStart" | "timeEnd">;
+
+/** 그날 검사자·검사(근무)시간: 저장 때 남긴 값 → 오늘이면 지금 값 → 기기의 작업일지 사본 → 빈 값. */
+export function dayStaffOn(date: string): StaffEdit {
+  const { meta } = state;
+  const saved = meta.dayStaff?.[date];
+  if (saved) return { insp1: saved.insp1, insp2: saved.insp2, timeStart: saved.timeStart, timeEnd: saved.timeEnd };
+  if (date === meta.workDate) return { insp1: meta.insp1, insp2: meta.insp2, timeStart: meta.timeStart, timeEnd: meta.timeEnd };
+  const log = workLogByDate()[date];
+  return { insp1: log?.workers[0] ?? "", insp2: log?.workers[1] ?? "", timeStart: log?.timeStart ?? "", timeEnd: log?.timeEnd ?? "" };
+}
+
+/**
+ * 리스트 탭 「수정」: 그날 검사자·검사시간을 바꾼다. 검사리스트에는 이 칸이 없고 작업일지(PAUT FIELD) 그날 행에 있으므로,
+ * 날짜별 값(dayStaff)을 바꾸고 그날 앱 기록을 작업일지만 다시 보내게 한다(저장 버튼과 같은 동기화 — 리스트·명세서는 다시 쓰지 않는다).
+ * 돌려주는 값: 이 값을 작업일지로 실어 갈 기록 수. 0 이면 아무것도 바꾸지 않는다.
+ */
+export function setDayStaff(date: string, staff: StaffEdit, recordIds: string[]): Promise<number> {
+  return enqueue(async () => {
+    const ids = new Set(recordIds);
+    const carriers = state.records.filter((r) => ids.has(r.id) && !r.deleted && r.result !== "없음" && r.date === date && !isRemovedSite(r.site));
+    if (!carriers.length) return 0;
+    const at = Date.now();
+    for (const rec of carriers) {
+      if (rec.sync === "local") continue;
+      rec.sync = "pending";
+      rec.syncError = undefined;
+      rec.steps = {
+        list: rec.steps?.list ?? { status: "done", at },
+        statement: rec.steps?.statement ?? { status: "done", at },
+      };
+    }
+    const prev = state.meta.dayStaff?.[date];
+    const logType = workLogByDate()[date]?.dayType;
+    const dayType: DayStaff["dayType"] =
+      prev?.dayType ?? (date === state.meta.workDate ? state.meta.dayType : logType === "평일" || logType === "공휴일" ? logType : defaultDayType(date));
+    state.meta = {
+      ...state.meta,
+      ...(date === state.meta.workDate ? staff : {}),
+      dayStaff: { ...(state.meta.dayStaff ?? {}), [date]: { dayType, ...staff } },
+    };
+    patch({ meta: state.meta, records: [...state.records] });
+    await persistMeta();
+    await persistRecords();
+    requestSync();
+    return carriers.length;
   });
 }
 

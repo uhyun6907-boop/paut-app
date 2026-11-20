@@ -20,18 +20,20 @@ vi.stubGlobal("localStorage", {
 
 import { GraphClient, graphRetry } from "../sync/graph";
 import type { FakeDrive } from "../test/fakeGraph";
-import { LIST_ID, graphConfig, realDrive, realGmRecords, realListRecords } from "../test/realBooks";
+import { LIST_GM_ID, LIST_ID, graphConfig, realDrive, realGmRecords, realListRecords } from "../test/realBooks";
 import { cellText, lastDataRow, LIVE_CHUNK_ROWS, LIVE_PARALLEL, loadLiveList, writeLiveCell, type LiveTable } from "../excel/liveList";
 import { readSheet } from "../excel/ooxml";
 import { packTable, unpackTable } from "../store/listCache";
 import { CACHE_STALE_TEXT, loadListCache, mergeTables, openList, type CacheSlot, type ListView } from "./listLoad";
 import { BLANK, activeColumns, applyFilters, clearColumn, columnValues, countText, filterableColumns, setText, toggleValue, type ListFilters } from "./listFilter";
-import { getState, liveListClient, settled } from "../store/session";
+import { dayStaffOn, getState, liveListClient, settled } from "../store/session";
 import { KEY_COLS, MODE_LABEL, shortLine, summarizeByDate, toggleDate, toggleEditing, toggleRow, visibleColumns, type DateFocus, type DateGroup } from "./listLayout";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { matchRecord } from "../excel/liveList";
-import { DateSummaryCard, applyRowAction, deleteConfirmText } from "./ListScreen";
+import { DateSummaryCard, applyRowAction, deleteConfirmText, moveDateGroup, moveDateConfirmText } from "./ListScreen";
+import { applyListCellEdits } from "../store/session";
+import { recordPatch, writeLiveCell as writeCell } from "../excel/liveList";
 
 const SITE = "드림 합정주공";
 let drive: FakeDrive;
@@ -319,11 +321,14 @@ describe("리스트 검사 날짜 요약 · 누르면 펼침, 「수정」 전�
         busy: false,
         editing: null,
         recordOf: (row) => matchRecord(getState().records, table, row),
+        staffOf: dayStaffOn,
         onDate: () => undefined,
         onEditing: () => undefined,
         onRow: () => undefined,
         onCell: () => undefined,
         onAction: () => undefined,
+        onMoveDate: () => undefined,
+        onStaff: () => undefined,
       }),
     );
   }
@@ -439,6 +444,141 @@ describe("리스트 검사 날짜 요약 · 누르면 펼침, 「수정」 전�
     await settled();
     expect(ok.done).toBe(true);
     expect(getState().records.find((r) => r.id === rec.id)).toMatchObject({ deleted: true, sync: "pending" });
+  });
+});
+
+describe("리스트 「수정」 · 검사 날짜 바꾸기(행 하나·그날 전체)", () => {
+  const SITE_PA = "지성 마전 PA";
+  const OLD = "2026-06-18";
+  const NEW = "2026-06-19";
+  async function maJeon(): Promise<LiveTable> {
+    const res = await loadLiveList(client(), graphConfig(), SITE_PA, getState().records);
+    if (!res.ok) throw new Error(res.message);
+    return res.table;
+  }
+  const textOf = (row: { cells: { col: string; value: unknown }[] }, col: string) => cellText(row.cells.find((c) => c.col === col) as never);
+  function seed(): void {
+    getState().records.splice(0, getState().records.length, ...realListRecords(), ...realGmRecords());
+  }
+  function render(group: DateGroup, focus: DateFocus, table: LiveTable): string {
+    return renderToStaticMarkup(
+      createElement(DateSummaryCard, {
+        group,
+        focus,
+        cols: visibleColumns(table.header, "key"),
+        busy: false,
+        editing: null,
+        recordOf: (row) => matchRecord(getState().records, table, row),
+        staffOf: dayStaffOn,
+        onDate: () => undefined,
+        onEditing: () => undefined,
+        onRow: () => undefined,
+        onCell: () => undefined,
+        onAction: () => undefined,
+        onMoveDate: () => undefined,
+        onStaff: () => undefined,
+      }),
+    );
+  }
+
+  it("행 하나의 날짜(E)를 바꾸면 그 칸만 일련번호로 쓰고, 새로 읽으면 그 행은 새 날짜 묶음에, 카드 날짜도 새 날짜", async () => {
+    seed();
+    const table = await maJeon();
+    const group = summarizeByDate(table.rows).find((g) => g.date === OLD)!;
+    const row = group.rows[0];
+    const rec = matchRecord(getState().records, table, structuredClone(row))!;
+    const cell = row.cells.find((c) => c.col === "E")!;
+    drive.log.length = 0;
+    const written = await writeCell(client(), table, cell, NEW);
+    await applyListCellEdits([{ id: rec.id, fields: recordPatch("E", written)! }]);
+    expect(writes()).toHaveLength(1);
+    expect(writes()[0].path).toContain(`range(address='E${row.row}')`);
+    expect(typeof (writes()[0].body as { values: unknown[][] }).values[0][0]).toBe("number");
+
+    const again = summarizeByDate((await maJeon()).rows);
+    expect(again.find((g) => g.date === OLD)!.rows).toHaveLength(43);
+    expect(again.find((g) => g.date === NEW)!.rows.some((r) => r.row === row.row)).toBe(true);
+    expect(getState().records.find((r) => r.id === rec.id)!.date).toBe(NEW);
+  });
+
+  it("그날 전체 날짜 바꾸기: 확인을 취소하면 아무것도 쓰지 않는다. 확인하면 그날 44행만 새 날짜로, 이어진 행은 PATCH 하나로", async () => {
+    seed();
+    const table = await maJeon();
+    const group = summarizeByDate(table.rows).find((g) => g.date === OLD)!;
+    const others = new Map(table.rows.filter((r) => !group.rows.includes(r)).map((r) => [r.row, textOf(r, "E")]));
+    const recIds = group.rows.map((r) => matchRecord(getState().records, table, r)!.id);
+    const asked: string[] = [];
+
+    drive.log.length = 0;
+    const no = await moveDateGroup(client(), table, group, NEW, (t) => (asked.push(t), false));
+    expect(no).toEqual({ done: false, note: "" });
+    expect(asked).toEqual(["26.06.18 의 44행을 26.06.19 로 바꿀까요?"]);
+    expect(moveDateConfirmText(group, NEW)).toBe(asked[0]);
+    expect(writes()).toEqual([]);
+    expect(getState().records.filter((r) => recIds.includes(r.id)).every((r) => r.date === OLD)).toBe(true);
+
+    const progress: number[] = [];
+    const res = await moveDateGroup(client(), table, group, NEW, () => true, (done) => progress.push(done));
+    expect(res.done).toBe(true);
+    if (!res.done) return;
+    expect(res.note).toBe("26.06.18 → 26.06.19 · 44행 바꿈 · 카드 44개 고침");
+    expect(res.rows.size).toBe(44);
+    expect(progress.at(-1)).toBe(44);
+    const patches = writes();
+    expect(patches.every((e) => e.method === "PATCH" && /range\(address='E\d+(:E\d+)?'\)/.test(e.path))).toBe(true);
+    expect(patches.length).toBeLessThan(44);
+    expect(drive.log.some((e) => /\/insert|\/worksheets\/add|\/copy/.test(e.path))).toBe(false);
+
+    const after = await maJeon();
+    const groups = summarizeByDate(after.rows);
+    expect(groups.find((g) => g.date === OLD)).toBeUndefined();
+    const moved = groups.find((g) => g.date === NEW)!;
+    expect(group.rows.every((r) => moved.rows.some((m) => m.row === r.row))).toBe(true);
+    for (const r of after.rows) if (others.has(r.row)) expect(textOf(r, "E")).toBe(others.get(r.row));
+    expect(getState().records.filter((r) => recIds.includes(r.id)).every((r) => r.date === NEW)).toBe(true);
+  });
+
+  it("그날 전체 날짜 바꾸기 중 다른 곳에서 바뀐 행만 실패로 알리고 나머지는 바꾼다", async () => {
+    seed();
+    const table = await maJeon();
+    const group = summarizeByDate(table.rows).find((g) => g.date === OLD)!;
+    const touched = group.rows[5];
+    await client().patchValues(LIST_GM_ID, table.sheetId, `E${touched.row}`, [[46000]]);
+    const res = await moveDateGroup(client(), table, group, NEW, () => true);
+    expect(res.done).toBe(true);
+    if (!res.done) return;
+    expect(res.rows.size).toBe(43);
+    expect(res.rows.has(touched.row)).toBe(false);
+    expect(res.note).toBe(`26.06.18 → 26.06.19 · 43행 바꿈 · 카드 43개 고침 · 실패 1행: ${touched.row}행 (다른 곳에서 바뀜)`);
+    const rec = matchRecord(getState().records, table, touched)!;
+    expect(rec.date).toBe(OLD);
+  });
+
+  it("「수정」 전에는 그날 날짜·검사자·검사시간 칸이 없고, 「수정」 뒤에만 보인다. 연 행에는 그날 검사자·검사시간", async () => {
+    seed();
+    getState().meta.dayStaff = { [OLD]: { dayType: "평일", insp1: "조우현", insp2: "심명보", timeStart: "10:00", timeEnd: "21:30" } };
+    const table = await maJeon();
+    const group = summarizeByDate(table.rows).find((g) => g.date === OLD)!;
+    const readOnly = render(group, { date: OLD, editing: false, row: null }, table);
+    expect(readOnly).not.toContain("날짜 바꾸기");
+    expect(readOnly).not.toContain("작업일지에 저장");
+    expect(readOnly).not.toContain('type="date"');
+    expect(readOnly).not.toContain('type="time"');
+    expect(render(group, null, table)).not.toContain("날짜 바꾸기");
+
+    const editing = render(group, { date: OLD, editing: true, row: null }, table);
+    expect(editing).toContain(">날짜 바꾸기</button>");
+    expect(editing).toContain(">작업일지에 저장</button>");
+    expect(editing).toMatch(new RegExp(`type="date"[^>]*value="${OLD}"`));
+    expect(editing).toMatch(/aria-label="검사자 1 \(그날\)" value="조우현"/);
+    expect(editing).toMatch(/aria-label="검사자 2 \(그날\)" value="심명보"/);
+    expect(editing).toMatch(/type="time"[^>]*value="10:00"/);
+    expect(editing).toMatch(/type="time"[^>]*value="21:30"/);
+
+    const rowOpen = render(group, { date: OLD, editing: true, row: group.rows[0].row }, table);
+    expect(rowOpen).toContain("조우현 · 심명보 · 10:00–21:30");
+    expect(rowOpen).toMatch(/<button[^>]*aria-label="[^"]* E\d+"[^>]*>/);
+    expect(rowOpen).not.toMatch(/<button[^>]*aria-label="[^"]* E\d+"[^>]*disabled/);
   });
 });
 

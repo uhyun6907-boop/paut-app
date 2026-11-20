@@ -1426,3 +1426,75 @@ describe("엑셀이 기준: 리스트 탭이 엑셀을 새로 읽으면 Y(앱 ID
     expect(mem.get("records")).toBe(stored);
   });
 });
+
+describe("리스트 「수정」 · 그날 검사자·검사시간(작업일지)", () => {
+  function iljiRow(iso: string): Record<string, string> {
+    const { cells } = readSheet(drive.files(ILJI_ID), " PAUT FIELD");
+    const serial = String(Math.round((Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10)) - Date.UTC(1899, 11, 30)) / 86400000));
+    const rows = [...cells.values()].filter((c) => c.col === "B" && c.v === serial).map((c) => c.row);
+    expect(rows).toHaveLength(1);
+    const out: Record<string, string> = {};
+    for (const c of cells.values()) if (c.row === rows[0]) out[c.col] = c.v ?? "";
+    return out;
+  }
+  const allIlji = () => [...readSheet(drive.files(ILJI_ID), " PAUT FIELD").cells.values()].map((c) => `${c.col}${c.row}=${c.v ?? ""}`).sort();
+
+  for (const { site, date, book } of [
+    { site: "지성 마전 PA", date: "2026-06-18", book: LIST_GM_ID },
+    { site: "드림 합정주공", date: "2026-06-17", book: LIST_ID },
+  ]) {
+    it(`${site} ${date}: 확인을 받은 뒤 그날 작업일지 행의 검사자(P·Q)·근무시간(S·T)만 바꾸고 리스트·다른 날은 그대로`, async () => {
+      seed([...realListRecords(), ...realGmRecords()]);
+      const s = await startApp();
+      const ui = await import("../ui/ListScreen");
+      const live = await import("../excel/liveList");
+      const { summarizeByDate } = await import("../ui/listLayout");
+      const { GraphClient } = await import("../sync/graph");
+      const client = new GraphClient({ getToken: async () => drive.validToken, fetchImpl: drive.fetch, sleep: async () => undefined });
+      const loaded = await live.loadLiveList(client, s.getState().config, site, s.getState().records);
+      if (!loaded.ok) throw new Error(loaded.message);
+      const table = loaded.table;
+      expect(table.itemId).toBe(book);
+      const group = summarizeByDate(table.rows).find((g) => g.date === date)!;
+      const before = iljiRow(date);
+      const beforeAll = allIlji();
+      const staff = { insp1: "김정환", insp2: "이연행", timeStart: "08:30", timeEnd: "17:45" };
+
+      const asked: string[] = [];
+      const no = await ui.applyDayStaff(table, group, staff, (t) => (asked.push(t), false));
+      expect(no).toEqual({ done: false, note: "" });
+      expect(asked[0]).toBe(`${date.slice(2).replace(/-/g, ".")} 검사자·검사시간을 김정환 · 이연행 · 08:30–17:45 로 바꿀까요? 작업일지(PAUT FIELD) 그날 행에 보냅니다.`);
+      expect(s.getState().meta.dayStaff?.[date]).toBeUndefined();
+      expect(s.syncQueue(s.getState().records)).toEqual([]);
+
+      drive.log.length = 0;
+      const res = await ui.applyDayStaff(table, group, staff, () => true);
+      expect(res.done).toBe(true);
+      if (!res.done) return;
+      await s.settled();
+      await s.syncIdle();
+
+      expect(s.getState().meta.dayStaff?.[date]).toEqual({ dayType: "평일", ...staff });
+      expect(s.dayStaffOn(date)).toEqual(staff);
+      const recs = s.getState().records.filter((r) => res.ids.includes(r.id));
+      expect(recs.length).toBe(group.rows.length);
+      expect(recs.every((r) => r.sync === "synced" && r.date === date && r.steps?.ilji?.status === "done")).toBe(true);
+      expect(ui.staffSentNote(date, recs)).toMatch(/작업일지에 반영됨$/);
+
+      const after = iljiRow(date);
+      expect(after.P).toBe("김정환");
+      expect(after.Q).toBe("이연행");
+      expect(Number(after.S)).toBeCloseTo(8.5 / 24, 8);
+      expect(Number(after.T)).toBeCloseTo(17.75 / 24, 8);
+      const rest = (row: Record<string, string>) => Object.entries(row).filter(([col]) => !["P", "Q", "S", "T"].includes(col));
+      expect(rest(after)).toEqual(rest(before));
+      const changed = allIlji().filter((x) => !beforeAll.includes(x));
+      expect(changed.every((x) => /^[PQST]\d+=/.test(x))).toBe(true);
+      expect(changed.length).toBeLessThanOrEqual(4);
+
+      const patched = drive.log.filter((e) => e.method !== "GET");
+      expect(patched.some((e) => e.path.includes(ILJI_ID))).toBe(true);
+      expect(patched.some((e) => e.path.includes(LIST_ID) || e.path.includes(LIST_GM_ID) || e.path.includes(STMT_ID))).toBe(false);
+    });
+  }
+});
