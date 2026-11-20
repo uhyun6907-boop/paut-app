@@ -25,9 +25,9 @@ import {
 } from "../test/realBooks";
 import {
   bootstrapFromSamples,
-  downloadListBook,
+  fetchWorkbook,
   exportBook,
-  listFileOf,
+  fileOf,
   restoreStatementOwnership,
   syncGraph,
   syncPendingDemo,
@@ -145,8 +145,8 @@ describe("군포·마전 리스트 파일 읽기", () => {
     expect(realListRecords().every((r) => listBookOf(r) === "list")).toBe(true);
     expect(realGmRecords().every((r) => listBookOf(r) === "listGm")).toBe(true);
     // 예전 설정(listGm 칸 없음) → 드라이브 루트의 기본 파일
-    expect(listFileOf(graphConfig(), "listGm")).toEqual({ id: LIST_GM_FILE.id, name: "PAUT NDT 리스트(군포, 마전).xlsx" });
-    expect(listFileOf({ ...graphConfig(), files: { ...graphConfig().files, listGm: null } }, "listGm")).toBeNull();
+    expect(fileOf(graphConfig(), "listGm")).toEqual({ id: LIST_GM_FILE.id, name: "PAUT NDT 리스트(군포, 마전).xlsx" });
+    expect(fileOf({ ...graphConfig(), files: { ...graphConfig().files, listGm: null } }, "listGm")).toBeNull();
   });
 
   it("관경(L)은 값으로 쓴다: '군포산본 이원화 750A-5' 의 RIGHT(F,4) 는 '0A-5' 라서 수식이면 틀린다", () => {
@@ -329,14 +329,14 @@ describe("Graph 동기화: 네 번째 파일(군포·마전 리스트)", () => {
     expect(drive.requests((e) => e.item === LIST_GM_ID)).toHaveLength(0);
   });
 
-  it("저장된 항목 ID 로 못 찾으면 드라이브 루트에서 정확한 이름 'PAUT NDT 리스트(군포, 마전).xlsx' 로 찾는다", async () => {
+  it("저장된 항목 ID 로 못 찾으면 정확한 이름 'PAUT NDT 리스트(군포, 마전).xlsx' 로 찾는다", async () => {
     const drive = new FakeDrive();
     drive.put("NEW-ID", LIST_GM_NAME, fixture("real-list-gunpo-majeon.xlsx"));
     drive.put("OTHER", "PAUT NDT 리스트(군포).xlsx", fixture("real-list-gunpo-majeon.xlsx"));
-    const got = await downloadListBook(client(drive), { id: LIST_GM_ID, name: LIST_GM_NAME });
+    const got = await fetchWorkbook(client(drive), { id: LIST_GM_ID, name: LIST_GM_NAME });
     expect(got.file).toEqual({ id: "NEW-ID", name: LIST_GM_NAME });
-    expect(parseListWorkbook(unzipXlsx(got.bytes), "listGm").map((s) => s.site)).toEqual(["지성 군포 PA", "아전 군포 PA", "지성 마전 PA"]);
-    await expect(downloadListBook(client(new FakeDrive()), { id: LIST_GM_ID, name: LIST_GM_NAME })).rejects.toThrow(/찾지 못했습니다/);
+    expect(parseListWorkbook(unzipXlsx(got.value), "listGm").map((s) => s.site)).toEqual(["지성 군포 PA", "아전 군포 PA", "지성 마전 PA"]);
+    await expect(fetchWorkbook(client(new FakeDrive()), { id: LIST_GM_ID, name: LIST_GM_NAME })).rejects.toThrow(`OneDrive 에서 「${LIST_GM_NAME}」 파일을 찾지 못했어요. 설정에서 파일을 다시 골라 주세요.`);
   });
 });
 

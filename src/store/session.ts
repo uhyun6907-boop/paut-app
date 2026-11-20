@@ -5,17 +5,17 @@ import { canonicalPoint, fmtPoint, mirrorPoint, parsePoint } from "../domain/poi
 import { normalizeResult } from "../excel/liveList";
 import { diameterFromLine } from "../domain/size";
 import { todayISO } from "../domain/dates";
-import type { AppConfig, DayMeta, DraftCard, FileSteps, InspectionRecord, ListBookKind, ResultKind, SiteMapping, SyncFile, SyncReport } from "../domain/types";
+import type { AppConfig, DayMeta, DraftCard, DriveFile, FileSteps, InspectionRecord, ListBookKind, ResultKind, SiteMapping, SyncFile, SyncReport } from "../domain/types";
 import { FAIL, PASS, SYNC_FILES, SYNC_FILE_LABEL } from "../domain/types";
 import {
   bootstrapFromSamples,
-  downloadListBook,
+  fetchWorkbook,
   errorText,
   exportBook,
   hasBook,
   listRecordsOnDevice,
   inspectorsOnDate,
-  listFileOf,
+  fileOf,
   listLabel,
   rememberBaseline,
   rememberWork,
@@ -377,19 +377,19 @@ function replaceListRecords(book: ListBookKind, parsed: InspectionRecord[], requ
 
 /**
  * 군포·마전 리스트를 아직 받지 않았으면 OneDrive 에서 받아 현장·기록을 넣는다(동기화 때 한 번).
- * 저장된 항목 ID 로 못 찾으면 드라이브 루트에서 'PAUT NDT 리스트(군포, 마전).xlsx' 를 이름으로 찾는다.
+ * 저장된 항목 ID 로 못 찾으면 'PAUT NDT 리스트(군포, 마전).xlsx' 를 이름으로 찾는다.
  * 실패해도 다른 파일 동기화는 계속한다. 돌려주는 값: 실패 이유.
  */
 async function ensureListGm(client: GraphClient): Promise<string | null> {
-  const file = listFileOf(state.config, "listGm");
+  const file = fileOf(state.config, "listGm");
   if (!file?.id) return null;
   if (hasBook("listGm") && state.records.some((r) => r.src === "xlsx" && listBookOf(r) === "listGm")) return null;
   try {
-    const got = await downloadListBook(client, file);
-    rememberBaseline("listGm", got.bytes);
-    await kvSet("book:listGm", got.bytes);
+    const got = await fetchWorkbook(client, file);
+    rememberBaseline("listGm", got.value);
+    await kvSet("book:listGm", got.value);
     const known = new Set(state.records.map((r) => r.id));
-    const parsed = parseListWorkbook(unzipXlsx(got.bytes), "listGm")
+    const parsed = parseListWorkbook(unzipXlsx(got.value), "listGm")
       .flatMap((x) => x.records)
       .filter((r) => !known.has(r.id));
     state.records = replaceListRecords("listGm", [...parsed, ...state.records.filter((r) => listBookOf(r) === "listGm" && r.src === "xlsx")], false);
@@ -399,7 +399,7 @@ async function ensureListGm(client: GraphClient): Promise<string | null> {
     patch({ records: [...state.records], config });
     await persistRecords();
     await persistConfig();
-    await rememberListFile("listGm", got.file);
+    await rememberFile("listGm", got.file);
     return null;
   } catch (error) {
     console.warn("군포·마전 리스트를 받지 못했습니다", error);
@@ -407,10 +407,10 @@ async function ensureListGm(client: GraphClient): Promise<string | null> {
   }
 }
 
-/** 리스트 파일을 저장된 ID 로 못 찾아(404) 이름으로 다시 찾았으면 새 ID 를 설정에 남긴다. 다음부터 옛 ID 를 부르지 않는다. */
-export async function rememberListFile(book: ListBookKind, file: { id: string; name: string }): Promise<void> {
-  if (listFileOf(state.config, book)?.id === file.id) return;
-  state.config = { ...state.config, files: { ...state.config.files, [book]: file } };
+/** 파일을 저장된 ID 로 못 찾아(404) 이름으로 다시 찾았으면 새 ID 를 설정에 남긴다. 다음부터 옛 ID 를 부르지 않는다. */
+export async function rememberFile(kind: BookKind, file: DriveFile): Promise<void> {
+  if (fileOf(state.config, kind)?.id === file.id) return;
+  state.config = { ...state.config, files: { ...state.config.files, [kind]: file } };
   patch({ config: state.config });
   await persistConfig();
 }
@@ -747,7 +747,7 @@ async function runSync(options: SyncOptions, ctl: RunCtl): Promise<void> {
       if (client.authFailed) loginLost = true;
       deferSoftFailures(outcome);
       applyOutcome(pending, outcome);
-      for (const [book, file] of outcome.listFiles) await rememberListFile(book, file);
+      for (const [kind, file] of outcome.files) await rememberFile(kind, file);
       if (loginLost) {
         freshTokenNext = true;
         patch({ loginNeeded: true });
@@ -866,7 +866,7 @@ function sanitizeReport(report: SyncReport): void {
 
 function hasAnyFile(): boolean {
   const f = state.config.files;
-  return !!(f.list?.id || listFileOf(state.config, "listGm")?.id || f.ilji?.id || f.statement?.id);
+  return !!(f.list?.id || fileOf(state.config, "listGm")?.id || f.ilji?.id || f.statement?.id);
 }
 
 function applyOutcome(pending: InspectionRecord[], outcome: GraphSyncOutcome): void {

@@ -156,8 +156,17 @@ describe("리스트 탭 · OneDrive 검사리스트 바로 보기·고치기", (
     drive.items.delete(LIST_ID);
     const gone = await loadLiveList(client(), graphConfig(), "드림 합정주공", realListRecords());
     expect(gone.ok).toBe(false);
-    if (!gone.ok) expect(gone.message).toContain("찾지 못했습니다");
+    if (!gone.ok) expect(gone.message).toContain("「평택에너지(택지,브레인,합정주공) NDT 리스트.xlsx」 파일을 찾지 못했어요");
     expect(writes()).toEqual([]);
+  });
+
+  it("평택 리스트가 다시 올라가 ID 가 404 면 하위 폴더까지 정확한 이름으로 찾아 새 ID 로 읽는다", async () => {
+    drive.reupload(LIST_ID, "LIST-REUPLOADED", "검사리스트");
+    const recs = realListRecords();
+    const table = await loadOk(recs.find((r) => r.src === "user")!.site, recs);
+    expect(table.itemId).toBe("LIST-REUPLOADED");
+    expect(table.fileName).toBe("평택에너지(택지,브레인,합정주공) NDT 리스트.xlsx");
+    expect(table.rows.length).toBeGreaterThan(0);
   });
 
   it("OneDrive 로그인 전이면 Graph 를 부르지 않고 한국어 안내", () => {

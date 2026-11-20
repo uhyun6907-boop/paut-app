@@ -1,5 +1,6 @@
 import type { ListWrite } from "../excel/listBook";
 import { isoToExcelSerial } from "../domain/dates";
+import type { DriveFile } from "../domain/types";
 import { ABORTED_TEXT, TimeoutError, TOKEN_TIMEOUT_TEXT } from "./timeout";
 import { AUTH_EXPIRED_TEXT, getAuthState, isLoginError, markExpired, trackRequest } from "./authState";
 
@@ -11,6 +12,7 @@ export interface DriveItem {
   size?: number;
   folder?: object;
   file?: object;
+  lastModifiedDateTime?: string;
 }
 
 export function worksheetRangeUrl(itemId: string, worksheetId: string, address: string): string {
@@ -156,6 +158,14 @@ export const GRAPH_LOGIN_TEXT = `${AUTH_EXPIRED_TEXT}. 설정에서 다시 로�
 /** Graph 요청 하나가 시간 안에 끝나지 않음. */
 export const GRAPH_TIMEOUT_TEXT = "OneDrive 응답이 없어(시간 초과) 멈췄습니다. 기록은 대기로 남습니다.";
 export { TOKEN_TIMEOUT_TEXT };
+
+/** 저장된 ID 도, 같은 이름도 OneDrive 에 없는 파일. */
+export class DriveFileMissing extends GraphError {
+  constructor(name: string) {
+    super(404, `OneDrive 에서 「${name}」 파일을 찾지 못했어요. 설정에서 파일을 다시 골라 주세요.`);
+    this.name = "DriveFileMissing";
+  }
+}
 
 /** 상태 코드 → 사용자에게 보일 이유. */
 export function explainGraphStatus(status: number, detail = ""): string {
@@ -412,16 +422,35 @@ export class GraphClient {
     return this.json(`${GRAPH}/me/drive/items/${encodeURIComponent(itemId)}?$select=id,name,eTag`);
   }
 
-  /** 드라이브 루트에서 이름이 정확히 같은 파일. 저장된 항목 ID 로 못 찾을 때(이동·다시 올림) 쓴다. */
-  async findRootFile(name: string): Promise<DriveItem | null> {
-    let url: string | undefined = `${GRAPH}/me/drive/root/children?$top=200&$select=id,name,file,folder`;
+  /**
+   * 저장된 항목 ID 로 use 를 부른다. 404 면(OneDrive 가 파일을 다시 올려 ID 가 바뀜) 드라이브 전체에서
+   * 이름이 정확히 같은 파일을 찾아 그 ID 로 한 번 더 부른다. 돌려주는 file 의 id 가 바뀌었으면 설정에 남겨야 한다.
+   * 찾지 못하면 DriveFileMissing.
+   */
+  async withFile<T>(file: DriveFile, use: (itemId: string) => Promise<T>): Promise<{ value: T; file: DriveFile }> {
+    try {
+      return { value: await use(file.id), file };
+    } catch (error) {
+      if (!(error instanceof GraphError) || error.status !== 404) throw error;
+      const found = file.name ? await this.findFileByName(file.name) : null;
+      if (!found) throw new DriveFileMissing(file.name || file.id);
+      return { value: await use(found.id), file: { id: found.id, name: found.name } };
+    }
+  }
+
+  /** 이름이 정확히 같은 파일(하위 폴더 포함). 여럿이면 가장 최근에 고친 것. 부분 일치는 고르지 않는다. */
+  private async findFileByName(name: string): Promise<DriveItem | null> {
+    const wanted = name.normalize("NFC");
+    const q = encodeURIComponent(name.replace(/'/g, "''"));
+    let url: string | undefined = `${GRAPH}/me/drive/root/search(q='${q}')?$top=200&$select=id,name,file,folder,lastModifiedDateTime`;
+    const hits: DriveItem[] = [];
     for (let page = 0; url && page < 10; page++) {
       const json: { value?: DriveItem[]; "@odata.nextLink"?: string } = await this.json(url);
-      const hit = (json.value ?? []).find((item) => !item.folder && item.name === name);
-      if (hit) return hit;
+      hits.push(...(json.value ?? []).filter((item) => !item.folder && item.name.normalize("NFC") === wanted));
       url = json["@odata.nextLink"];
     }
-    return null;
+    hits.sort((a, b) => (b.lastModifiedDateTime ?? "").localeCompare(a.lastModifiedDateTime ?? ""));
+    return hits[0] ?? null;
   }
 
   async download(itemId: string): Promise<Uint8Array> {

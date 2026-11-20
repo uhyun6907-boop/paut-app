@@ -49,6 +49,9 @@ interface Item {
   name: string;
   files: ZipFiles;
   version: number;
+  /** 들어 있는 폴더 이름(없으면 드라이브 루트). 검색은 폴더와 상관없이 찾는다. */
+  folder?: string;
+  modified: string;
 }
 
 export class FakeDrive {
@@ -68,8 +71,16 @@ export class FakeDrive {
   private rowHeightEdits = new Map<string, number>();
   private sharedCache = new WeakMap<Uint8Array, string[]>();
 
-  put(id: string, name: string, bytes: Uint8Array): void {
-    this.items.set(id, { name, files: unzipXlsx(bytes), version: 1 });
+  put(id: string, name: string, bytes: Uint8Array, opts: { folder?: string; modified?: string } = {}): void {
+    this.items.set(id, { name, files: unzipXlsx(bytes), version: 1, folder: opts.folder, modified: opts.modified ?? "2026-11-17T00:00:00Z" });
+  }
+
+  /** OneDrive 가 파일을 다시 올려 항목 ID 만 바뀐 것처럼 옮긴다(옛 ID 는 404). */
+  reupload(from: string, to: string, folder?: string): void {
+    const item = this.items.get(from);
+    if (!item) throw new Error(`no item ${from}`);
+    this.items.delete(from);
+    this.items.set(to, { ...item, folder: folder ?? item.folder });
   }
 
   /** 다른 곳(PC 엑셀)에서 파일이 바뀐 것처럼 버전만 올린다(eTag 가 달라짐). */
@@ -253,8 +264,16 @@ export class FakeDrive {
       return err(fault.status, `fake ${fault.status}`, h);
     }
     if (path === "/$batch" && method === "POST") return this.batch(init, headers);
-    if (/^\/me\/drive\/root\/children(\?|$)/.test(path) && method === "GET") {
-      return json({ value: [...this.items.entries()].map(([id, it]) => ({ id, name: it.name, file: {} })) });
+    const search = /^\/me\/drive\/root\/search\(q='(.*)'\)/.exec(path);
+    if (search && method === "GET") {
+      const words = search[1].replace(/''/g, "'").toLowerCase().split(/[\s(),_.]+/).filter(Boolean);
+      const hits = [...this.items.entries()].filter(([, it]) => words.some((w) => it.name.toLowerCase().includes(w)));
+      return json({
+        value: [
+          ...[...new Set(hits.map(([, it]) => it.folder).filter(Boolean))].map((name) => ({ id: `folder:${name}`, name, folder: {} })),
+          ...hits.map(([id, it]) => ({ id, name: it.name, file: {}, lastModifiedDateTime: it.modified })),
+        ],
+      });
     }
     const item = this.items.get(itemId);
     if (!item) return err(404, "itemNotFound");

@@ -161,15 +161,21 @@ export interface SiteMapping {
   priceNote: string;
 }
 
+/** 설정에 저장한 OneDrive 파일. */
+export interface DriveFile {
+  id: string;
+  name: string;
+}
+
 export interface AppConfig {
   clientId: string;
   syncMode: "demo" | "graph";
   files: {
-    list: { id: string; name: string } | null;
+    list: DriveFile | null;
     /** 군포·마전 리스트. 예전 설정에는 없다(undefined → 기본 파일 LIST_GM_FILE). */
-    listGm?: { id: string; name: string } | null;
-    ilji: { id: string; name: string } | null;
-    statement: { id: string; name: string } | null;
+    listGm?: DriveFile | null;
+    ilji: DriveFile | null;
+    statement: DriveFile | null;
   };
   mappings: SiteMapping[];
   /** 관경(A) → 용접길이(m) */

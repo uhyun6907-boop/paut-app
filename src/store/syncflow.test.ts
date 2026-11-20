@@ -1231,3 +1231,77 @@ describe("지성 마전 PA 003 S06·R06(엑셀 118·125행, 앱 ID 없음) — �
     expect(gmRow(125).P).toBe("");
   });
 });
+
+describe("OneDrive 가 파일을 다시 올려 저장된 항목 ID 가 404 일 때(2026-11-17)", () => {
+  const ILJI_NEW = "73DF94A06E5230E0!s45a9148c78c74228a9cebdacffa3c7f6";
+  const LIST_NEW = "73DF94A06E5230E0!s8c0daf5d27204cd58f4a82f61b4cd27e";
+  const STMT_NEW = "STMT-REUPLOADED";
+  const STMT_FOLDER = "00_PAUT 거래명세서";
+  const STMT_SHEET = "드림합정26.11";
+  const OLD_IDS = [LIST_ID, ILJI_ID, STMT_ID];
+
+  function rowsOn(date: string, itemId: string) {
+    return readPautRows(drive.files(itemId), STMT_SHEET).filter((r) => r.date === date);
+  }
+
+  function addPending(...recs: InspectionRecord[]): void {
+    mem.set("records", [...(mem.get("records") as InspectionRecord[]), ...recs]);
+  }
+
+  it("작업일지·평택 리스트·하위 폴더로 간 거래명세서를 이름으로 찾아 보내고 새 ID 를 설정에 남긴다. 다음에는 새 ID 만 부른다", async () => {
+    seed([...realListRecords(), rec("S28", PASS)]);
+    await startApp();
+    expect(rowsOn("2026-11-12", STMT_ID).map((r) => r.count)).toEqual([1]);
+
+    drive.reupload(ILJI_ID, ILJI_NEW);
+    drive.reupload(LIST_ID, LIST_NEW);
+    drive.reupload(STMT_ID, STMT_NEW, STMT_FOLDER);
+    drive.put("ILJI-OLD-BACKUP", "PAUT 근무일지.xlsx", fixture("real-worklog.xlsx"), { folder: "백업", modified: "2025-01-01T00:00:00Z" });
+    drive.put("ILJI-COPY", "PAUT 근무일지 사본.xlsx", fixture("real-worklog.xlsx"), { modified: "2026-11-19T00:00:00Z" });
+    const s29 = rec("S29", PASS);
+    addPending(s29);
+    drive.log = [];
+
+    const s = await startApp();
+    const st = s.getState();
+    expect(st.records.find((r) => r.id === s29.id)).toMatchObject({ sync: "synced" });
+    expect(st.syncReport?.files).toMatchObject({ list: { status: "ok" }, ilji: { status: "ok" }, statement: { status: "ok" } });
+    expect(st.config.files.ilji).toEqual({ id: ILJI_NEW, name: "PAUT 근무일지.xlsx" });
+    expect(st.config.files.list).toEqual({ id: LIST_NEW, name: "평택에너지(택지,브레인,합정주공) NDT 리스트.xlsx" });
+    expect(st.config.files.statement).toEqual({ id: STMT_NEW, name: "02_PAUT 거래명세서 (지성, 드림).xlsx" });
+    expect((mem.get("config") as typeof st.config).files.ilji?.id).toBe(ILJI_NEW);
+    expect(drive.requests((e) => e.item === "ILJI-OLD-BACKUP" || e.item === "ILJI-COPY")).toHaveLength(0);
+    expect(drive.requests((e) => e.method === "PATCH" && e.item === ILJI_NEW).length).toBeGreaterThan(0);
+    expect(parseListWorkbook(drive.files(LIST_NEW)).flatMap((x) => x.records).some((r) => r.id === s29.id)).toBe(true);
+    expect(rowsOn("2026-11-12", STMT_NEW).map((r) => r.count)).toEqual([2]);
+
+    const r29 = rec("R29", PASS);
+    addPending(r29);
+    drive.log = [];
+    const again = await startApp();
+    expect(again.getState().records.find((r) => r.id === r29.id)).toMatchObject({ sync: "synced" });
+    expect(drive.requests((e) => OLD_IDS.includes(e.item))).toHaveLength(0);
+    expect(drive.requests((e) => e.path.includes("/search("))).toHaveLength(0);
+    expect(drive.requests((e) => e.status === 404)).toHaveLength(0);
+    expect(rowsOn("2026-11-12", STMT_NEW).map((r) => r.count)).toEqual([3]);
+  });
+
+  it("ID 도 정확한 이름도 없으면 그 파일만 실패하고 파일 이름을 말한다. 리스트·거래명세서는 그대로 보낸다", async () => {
+    drive.items.delete(ILJI_ID);
+    drive.put("ILJI-COPY", "PAUT 근무일지 사본.xlsx", fixture("real-worklog.xlsx"));
+    const today = rec("S28", PASS);
+    seed([...realListRecords(), today]);
+
+    const st = (await startApp()).getState();
+    const mine = st.records.find((r) => r.id === today.id)!;
+    expect(mine.steps).toMatchObject({ list: { status: "done" }, ilji: { status: "error" }, statement: { status: "done" } });
+    expect(st.syncReport?.files.ilji).toEqual({
+      status: "error",
+      message: "작업일지: OneDrive 에서 「PAUT 근무일지.xlsx」 파일을 찾지 못했어요. 설정에서 파일을 다시 골라 주세요.",
+    });
+    expect(st.syncReport?.files).toMatchObject({ list: { status: "ok" }, statement: { status: "ok" } });
+    expect(st.config.files.ilji?.id).toBe(ILJI_ID);
+    expect(drive.requests((e) => e.item === "ILJI-COPY")).toHaveLength(0);
+    expect(rowsOn("2026-11-12", STMT_ID).map((r) => r.count)).toEqual([1]);
+  });
+});

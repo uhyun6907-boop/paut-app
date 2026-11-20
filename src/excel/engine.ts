@@ -1,6 +1,6 @@
 import { buildBill, iljiDiameterLabel, passingRecords } from "../domain/billing";
 import { isoToExcelSerial, parseFlexibleDate } from "../domain/dates";
-import type { AppConfig, DayMeta, DayStaff, FileSteps, InspectionRecord, ListBookKind, SyncFile, SyncReport, SyncStatus } from "../domain/types";
+import type { AppConfig, DayMeta, DayStaff, DriveFile, FileSteps, InspectionRecord, ListBookKind, SyncFile, SyncReport, SyncStatus } from "../domain/types";
 import { FAIL, LIST_BOOKS, LIST_BOOK_LABEL, LIST_GM_FILE, PASS, SYNC_FILE_LABEL } from "../domain/types";
 import { findMonthSheet, isRemovedSite, mappingFor, REMOVED_SITE_MAPPINGS } from "../domain/mapping";
 import { readDayStaff, readInspectors, readWorkLog, applyIljiDay, findIljiSheet, readIljiDay, type IljiGroup, type WorkLogDay } from "./iljiBook";
@@ -14,10 +14,10 @@ import { copyRowFormat } from "../sync/rowFormat";
 /** 이 기기에 사본을 두는 통합 문서. 검사리스트는 두 파일(평택 list, 군포·마전 listGm). */
 export type BookKind = SyncFile | "listGm";
 
-/** 리스트 파일 설정. 군포·마전은 예전 설정에 칸이 없으면(undefined) 드라이브 루트의 기본 파일을 쓴다. */
-export function listFileOf(config: AppConfig, book: ListBookKind): { id: string; name: string } | null {
-  if (book === "listGm") return config.files.listGm === undefined ? { ...LIST_GM_FILE } : config.files.listGm;
-  return config.files.list;
+/** 설정의 파일. 군포·마전은 예전 설정에 칸이 없으면(undefined) 드라이브 루트의 기본 파일을 쓴다. */
+export function fileOf(config: AppConfig, kind: BookKind): DriveFile | null {
+  if (kind === "listGm") return config.files.listGm === undefined ? { ...LIST_GM_FILE } : config.files.listGm;
+  return config.files[kind];
 }
 
 /** 화면·상태에 보일 리스트 이름. 평택만 쓰면 예전처럼 '검사리스트'. */
@@ -48,6 +48,16 @@ const LOCAL_BOOK = "local";
 
 function ownershipKey(book: string, sheet: string): string {
   return `${book}|${sheet}`;
+}
+
+/** 거래명세서 항목 ID 가 바뀌어도(다시 올림) 앱이 쓴 줄을 사람 줄로 보지 않게 기억을 새 ID 로 옮긴다. */
+function moveOwnership(owned: StatementOwnership, from: string, to: string): void {
+  if (from === to) return;
+  for (const key of Object.keys(owned)) {
+    if (!key.startsWith(`${from}|`)) continue;
+    owned[ownershipKey(to, key.slice(from.length + 1))] = owned[key];
+    delete owned[key];
+  }
 }
 
 /**
@@ -355,8 +365,8 @@ export interface GraphSyncOutcome {
   report: SyncReport;
   /** 리스트에는 앱 ID 로 있는데 이 기기에 없던 기록 */
   discovered: InspectionRecord[];
-  /** 저장된 ID 가 404 라 이름으로 다시 찾은 리스트 파일. 설정에 남겨야 한다. */
-  listFiles: Map<ListBookKind, { id: string; name: string }>;
+  /** 저장된 ID 가 404 라 이름으로 다시 찾은 파일. 설정에 남겨야 한다. */
+  files: Map<BookKind, DriveFile>;
 }
 
 function needs(rec: InspectionRecord, file: SyncFile): boolean {
@@ -375,13 +385,21 @@ const BACKFILL_DAYS = 62;
 class Run {
   steps = new Map<string, FileSteps>();
   excelRows = new Map<string, number>();
-  listFiles = new Map<ListBookKind, { id: string; name: string }>();
+  files = new Map<BookKind, DriveFile>();
   report: SyncReport;
-  constructor(at: number) {
+  constructor(at: number, private config: AppConfig) {
     this.report = {
       at,
       files: { list: { status: "idle" }, ilji: { status: "idle" }, statement: { status: "idle" } },
     };
+  }
+  /** 이번 동기화에서 쓸 파일. 앞 단계에서 이름으로 다시 찾았으면 그 파일. */
+  file(kind: BookKind): DriveFile | null {
+    return this.files.get(kind) ?? fileOf(this.config, kind);
+  }
+  /** 저장된 항목 ID 대신 쓴 파일(GraphClient.withFile 결과)을 기억한다. */
+  found(kind: BookKind, file: DriveFile): void {
+    if (file.id !== this.file(kind)?.id) this.files.set(kind, file);
   }
   mark(recs: Iterable<InspectionRecord>, file: SyncFile, status: "done" | "error" | "skip" | "wait", message?: string): void {
     for (const rec of recs) {
@@ -424,7 +442,7 @@ class Run {
  * - 거래명세서 새 달 시트는 만들지 않는다. 없으면 그 현장·달만 '대기'로 두고 다음 동기화 때 채운다.
  */
 export async function syncGraph(args: GraphSyncArgs): Promise<GraphSyncOutcome> {
-  const run = new Run(Date.now());
+  const run = new Run(Date.now(), args.config);
   const discovered: InspectionRecord[] = [];
   // 앱에서 지운 현장은 보내지 않는다(엑셀은 그대로).
   const jobs = args.jobs.filter((r) => r.result !== "없음" && !isRemovedSite(r.site));
@@ -436,14 +454,14 @@ export async function syncGraph(args: GraphSyncArgs): Promise<GraphSyncOutcome> 
 
   if (args.backfill && args.scanList) {
     for (const book of LIST_BOOKS) {
-      const file = run.listFiles.get(book) ?? listFileOf(args.config, book);
+      const file = run.file(book);
       if (!file?.id) continue;
       // 군포·마전은 그 파일의 기록이 이 기기에 있을 때만 받는다(아직 안 쓰면 요청하지 않음).
       if (book !== "list" && !all.some((r) => listBookOf(r) === book)) continue;
       try {
-        const got = await downloadListBook(args.client, file);
-        if (got.file.id !== file.id) run.listFiles.set(book, got.file);
-        const files = unzipXlsx(got.bytes);
+        const got = await fetchWorkbook(args.client, file);
+        run.found(book, got.file);
+        const files = unzipXlsx(got.value);
         const known = new Set([...all, ...discovered].map((r) => r.id));
         for (const site of parseListWorkbook(files, book)) {
           for (const rec of site.records) {
@@ -465,7 +483,7 @@ export async function syncGraph(args: GraphSyncArgs): Promise<GraphSyncOutcome> 
   if (listChecked) run.mark(candidates.filter((r) => !r.steps?.list && listChecked.present.has(r.id)), "list", "done");
   await iljiStep(args, run, jobs, candidates, all);
   await statementStep(args, run, jobs, candidates, all);
-  return { steps: run.steps, excelRows: run.excelRows, report: run.report, discovered, listFiles: run.listFiles };
+  return { steps: run.steps, excelRows: run.excelRows, report: run.report, discovered, files: run.files };
 }
 
 /**
@@ -536,7 +554,7 @@ async function listBookStep(
   recs: InspectionRecord[],
   verify: InspectionRecord[],
 ): Promise<ListCheck | null> {
-  const file = listFileOf(args.config, book);
+  const file = run.file(book);
   if (!file?.id) {
     if (recs.length) run.listFail(book, recs, new Error(`설정에서 ${listLabel(book)} 파일을 고르세요.`));
     return null;
@@ -549,9 +567,9 @@ async function listBookStep(
   try {
     // 파일마다 새 토큰(중간 만료 방지).
     await args.client.refreshToken();
-    const opened = await openListWorkbook(args.client, file);
-    wb = opened.wb;
-    if (opened.file.id !== file.id) run.listFiles.set(book, opened.file);
+    const opened = await args.client.withFile(file, (id) => args.client.openWorkbook(id));
+    wb = opened.value;
+    run.found(book, opened.file);
     const bySheet = new Map<string, InspectionRecord[]>();
     const verifyBySheet = new Map<string, InspectionRecord[]>();
     for (const rec of recs) {
@@ -721,18 +739,6 @@ function rowKey(date: unknown, line: unknown, point: unknown): string | null {
   return `${serial}|${l}|${p}`;
 }
 
-/** 리스트 통합 문서 세션. 저장된 항목 ID 가 404 면 드라이브 루트에서 같은 이름의 파일을 찾아 연다. */
-async function openListWorkbook(client: GraphClient, file: { id: string; name: string }): Promise<{ wb: WorkbookSession; file: { id: string; name: string } }> {
-  try {
-    return { wb: await client.openWorkbook(file.id), file };
-  } catch (error) {
-    if (!(error instanceof GraphError) || error.status !== 404 || !file.name) throw error;
-    const found = await client.findRootFile(file.name);
-    if (!found) throw error;
-    return { wb: await client.openWorkbook(found.id), file: { id: found.id, name: found.name } };
-  }
-}
-
 /** 앱 화면의 엑셀 미리보기용 사본에도 같은 행을 쓴다. 실패해도 동기화와는 상관없다. */
 function mirrorListLocally(rec: InspectionRecord, row: number, appended: boolean): void {
   const book = listBookOf(rec);
@@ -777,14 +783,16 @@ async function iljiStep(args: GraphSyncArgs, run: Run, jobs: InspectionRecord[],
   }
   if (!days.size && !verify.size) return;
   const allRecs = [...days.values(), ...verify.values()].flat();
-  const itemId = config.files.ilji?.id;
-  if (!itemId) {
+  const file = run.file("ilji");
+  if (!file?.id) {
     run.fail("ilji", allRecs, new Error("설정에서 작업일지 파일을 고르세요."));
     return;
   }
   try {
-    await client.refreshToken();
-    const before = unzipXlsx(await client.download(itemId));
+    const got = await fetchWorkbook(client, file);
+    run.found("ilji", got.file);
+    const itemId = got.file.id;
+    const before = unzipXlsx(got.value);
     const sheet = findIljiSheet(before);
     // 백필: 작업일지에 그날 그 열이 비어 있을 때만 채운다. 이미 뭔가 적혀 있으면(사람이 적었을 수 있음) 건드리지 않는다.
     for (const [key, recs] of verify) {
@@ -879,15 +887,18 @@ async function statementStep(args: GraphSyncArgs, run: Run, jobs: InspectionReco
     return;
   }
   const allRecs = [...groups.values(), ...verify.values()].flatMap((g) => g.recs);
-  const itemId = config.files.statement?.id;
-  if (!itemId) {
+  const file = run.file("statement");
+  if (!file?.id) {
     run.fail("statement", allRecs, new Error("설정에서 거래명세서 파일을 고르세요."));
     return;
   }
   try {
     for (const g of [...groups.values(), ...verify.values()]) g.lines = statementLines(g.site, g.ym, all, config);
-    await client.refreshToken();
-    const before = unzipXlsx(await client.download(itemId));
+    const got = await fetchWorkbook(client, file);
+    run.found("statement", got.file);
+    const itemId = got.file.id;
+    moveOwnership(owned, file.id, itemId);
+    const before = unzipXlsx(got.value);
 
     // 백필: 그 달 시트에 이 날짜·관경 줄이 없을 때만 채운다.
     for (const [key, g] of verify) {
@@ -970,23 +981,10 @@ async function waitForSheet(wb: WorkbookSession, name: string, sleep?: (ms: numb
   throw new GraphError(404, `거래명세서에 '${name}' 시트가 OneDrive에 아직 보이지 않습니다. 잠시 뒤 다시 시도하세요.`);
 }
 
-/**
- * 리스트 파일을 받는다. 저장된 항목 ID 로 못 찾으면(404: 이동·다시 올림) 드라이브 루트에서 정확히 같은 이름을 찾는다.
- * 돌려주는 file 의 id 가 바뀌었으면 설정에 저장해야 한다.
- */
-export async function downloadListBook(
-  client: GraphClient,
-  file: { id: string; name: string },
-): Promise<{ bytes: Uint8Array; file: { id: string; name: string } }> {
+/** 통합 문서를 새 토큰으로 받는다. 저장된 ID 가 404 면 이름으로 찾은 파일(file 이 바뀜). */
+export async function fetchWorkbook(client: GraphClient, file: DriveFile): Promise<{ value: Uint8Array; file: DriveFile }> {
   await client.refreshToken();
-  try {
-    return { bytes: await client.download(file.id), file };
-  } catch (error) {
-    if (!(error instanceof GraphError) || error.status !== 404 || !file.name) throw error;
-    const found = await client.findRootFile(file.name);
-    if (!found) throw error;
-    return { bytes: await client.download(found.id), file: { id: found.id, name: found.name } };
-  }
+  return client.withFile(file, (id) => client.download(id));
 }
 
 /** 데모(로그인 없음): 이 기기 안의 통합 문서에만 쓴다. */

@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { isRemovedSite } from "../domain/mapping";
 import { LIST_BOOK_LABEL } from "../domain/types";
 import { cellText, isEditable, liveTarget, loadLiveList, matchRecord, recordPatch, writeLiveCell, LiveConflictError, type LiveCell, type LiveRow, type LiveTable } from "../excel/liveList";
-import { listFileOf } from "../excel/engine";
+import { fileOf } from "../excel/engine";
 import { CACHE_STALE_TEXT, REFRESHING_TEXT, openList, saveListCache, savedAtText, type CacheSlot, type ListView } from "./listLoad";
 import { FilterPanel, FilterBar } from "./ListFilterPanel";
 import { applyFilters, type ListFilters } from "./listFilter";
@@ -22,7 +22,7 @@ import {
   getState,
   graphReadOk,
   liveListClient,
-  rememberListFile,
+  rememberFile,
   repairSavedRecord,
   settled,
   signIn,
@@ -72,7 +72,7 @@ export async function readLiveList(
     const res = await withTimeout(loadLiveList(client, live.config, site, live.records), timeoutMs, LIST_TIMEOUT_TEXT);
     if (res.ok) {
       graphReadOk();
-      await rememberListFile(res.table.book, { id: res.table.itemId, name: res.table.fileName });
+      await rememberFile(res.table.book, { id: res.table.itemId, name: res.table.fileName });
       return res;
     }
     return { ok: false, message: isLoginFailureText(res.message) ? LIST_LOGIN_TEXT : res.message || "검사리스트를 읽지 못했습니다." };
@@ -262,7 +262,7 @@ export function ListScreen() {
   const expired = session.config.syncMode === "graph" && (session.auth === "expired" || session.auth === "signedOut");
   const target = site ? liveTarget(site, session.records) : null;
   const slot: CacheSlot | null = target
-    ? { book: target.book, fileId: listFileOf(session.config, target.book)?.id ?? "", sheetName: target.sheetName }
+    ? { book: target.book, fileId: fileOf(session.config, target.book)?.id ?? "", sheetName: target.sheetName }
     : null;
 
   /** keep: 같은 현장 새로 불러오기 — 지금 표를 그대로 둔 채 뒤에서 읽는다. */

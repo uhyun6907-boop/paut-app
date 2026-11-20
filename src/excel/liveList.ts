@@ -9,8 +9,8 @@ import { FAIL, PASS } from "../domain/types";
 import { excelSerialToISO, isoToExcelSerial, parseFlexibleDate } from "../domain/dates";
 import type { AppConfig, InspectionRecord, ListBookKind } from "../domain/types";
 import { LIST_BOOK_LABEL } from "../domain/types";
-import { GraphError, type GraphCell, type GraphClient } from "../sync/graph";
-import { listFileOf } from "./engine";
+import { DriveFileMissing, GraphError, type GraphCell, type GraphClient } from "../sync/graph";
+import { fileOf } from "./engine";
 import { listBookOf, listSheetOf } from "./listBook";
 import { columnIndex, columnLetter } from "./ooxml";
 
@@ -133,24 +133,17 @@ function same(a: GraphCell | undefined, b: GraphCell | undefined): boolean {
 export async function loadLiveList(client: GraphClient, config: AppConfig, site: string, records: InspectionRecord[]): Promise<LiveLoad> {
   const { book, sheetName } = liveTarget(site, records);
   const label = LIST_BOOK_LABEL[book];
-  const file = listFileOf(config, book);
+  const file = fileOf(config, book);
   if (!file?.id) return { ok: false, message: `${label} 파일을 아직 고르지 않았습니다. 설정 → OneDrive 통합 문서에서 고르세요.` };
-  let itemId = file.id;
-  let meta: { id: string; name: string; eTag?: string };
-  // 파일 정보와 시트 목록은 동시에 묻는다(왕복 한 번 절약). 파일이 옮겨졌으면(404) 이름으로 찾아 다시 묻는다.
-  let sheetsP = client.worksheetsOf(itemId);
-  sheetsP.catch(() => undefined);
-  try {
-    meta = await client.itemMeta(itemId);
-  } catch (error) {
-    if (!(error instanceof GraphError) || error.status !== 404) throw error;
-    const found = file.name ? await client.findRootFile(file.name) : null;
-    if (!found) return { ok: false, message: `OneDrive 에서 ${label} 파일(${file.name || itemId})을 찾지 못했습니다.` };
-    itemId = found.id;
-    meta = await client.itemMeta(itemId);
-    sheetsP = client.worksheetsOf(itemId);
-  }
-  const sheets = await sheetsP;
+  const opened = await client
+    .withFile(file, (id) => Promise.all([client.itemMeta(id), client.worksheetsOf(id)]))
+    .catch((error: unknown) => {
+      if (error instanceof DriveFileMissing) return error;
+      throw error;
+    });
+  if (opened instanceof DriveFileMissing) return { ok: false, message: opened.message };
+  const itemId = opened.file.id;
+  const [meta, sheets] = opened.value;
   const sheet = sheets.find((s) => s.name === sheetName) ?? sheets.find((s) => s.name.trim() === sheetName.trim());
   if (!sheet) return { ok: false, message: `${meta.name || label} 에 '${sheetName}' 시트가 없습니다. 시트는 앱이 만들지 않습니다(PC 엑셀에서 만들어 주세요).` };
   // 서식만 있는 빈 행(실제 시트는 65536행까지)·미리 채운 순번(A)만 있는 행은 읽지 않는다:
