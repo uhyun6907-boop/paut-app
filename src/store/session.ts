@@ -2084,6 +2084,25 @@ export function setDayStaff(date: string, staff: StaffEdit, recordIds: string[])
 }
 
 /**
+ * 일지 탭에서 작업일지 날짜 행의 검사자·근무시간·구분을 엑셀에 직접 고친 뒤, 그날 값(dayStaff)을 엑셀에 맞춘다.
+ * 엑셀은 이미 그 값이므로 다시 보내지 않는다. 나중에 그날 기록을 보낼 때 옛 값으로 덮지 않게 하려는 것.
+ */
+export function adoptIljiDayStaff(date: string, row: StaffEdit & { dayType: string }): Promise<void> {
+  return enqueue(async () => {
+    const prev = state.meta.dayStaff?.[date];
+    const dayType: DayStaff["dayType"] = row.dayType === "평일" || row.dayType === "공휴일" ? row.dayType : prev?.dayType ?? defaultDayType(date);
+    const staff: DayStaff = { dayType, insp1: row.insp1, insp2: row.insp2, timeStart: row.timeStart, timeEnd: row.timeEnd };
+    state.meta = {
+      ...state.meta,
+      ...(date === state.meta.workDate ? staff : {}),
+      dayStaff: { ...(state.meta.dayStaff ?? {}), [date]: staff },
+    };
+    patch({ meta: state.meta });
+    await persistMeta();
+  });
+}
+
+/**
  * 리스트 탭이 엑셀에서 새로 읽은 표로, Y(앱 ID)가 같은 저장된 카드를 엑셀 값·행 번호(excelRow)에 맞춘다(엑셀이 기준).
  * 엑셀로 다시 보내지 않고 미저장으로 만들지 않는다. 빈 칸은 카드 값을 지우지 않는다.
  * 아직 엑셀에 다 보내지 못한 카드(대기·보내는 중·실패)는 카드 쪽이 더 새 값이라 건드리지 않는다.

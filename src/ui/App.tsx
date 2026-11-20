@@ -3,6 +3,7 @@ import { bindOnline, dismissToast, initSession, removeRecord, resetSamples, sync
 import { headerStatus } from "../store/syncStatus";
 import { ExcelScreen } from "./ExcelScreen";
 import { EntryView } from "./EntryView";
+import { IljiScreen } from "./IljiScreen";
 import { RefScreen } from "./RefScreen";
 import { ListScreen } from "./ListScreen";
 import { SettingsScreen } from "./SettingsScreen";
@@ -10,7 +11,19 @@ import { LoginBanner } from "./LoginBanner";
 import { SyncPanel } from "./SyncPanel";
 import { useDrill } from "./drill";
 
-type Tab = "entry" | "list" | "log" | "bill" | "settings" | "ref";
+type Tab = "entry" | "ilji" | "list" | "log" | "bill" | "settings" | "ref";
+
+export function JournalTab({ part, onPart }: { part: "ilji" | "ref"; onPart: (part: "ilji" | "ref") => void }) {
+  return (
+    <>
+      <div className="segment tab-segment">
+        <button className={part === "ilji" ? "on" : ""} type="button" onClick={() => onPart("ilji")}>근무일지</button>
+        <button className={part === "ref" ? "on" : ""} type="button" onClick={() => onPart("ref")}>참고</button>
+      </div>
+      {part === "ilji" ? <IljiScreen /> : <RefScreen />}
+    </>
+  );
+}
 
 export function App() {
   const session = useSession();
@@ -98,7 +111,7 @@ export function App() {
         ) : (
           <>
             <div className="ios-title-row">
-              <h1>{tab === "list" ? "리스트" : tab === "log" ? "일지" : tab === "bill" ? "명세서" : tab === "settings" ? "설정" : "참고"}</h1>
+              <h1>{tab === "list" ? "리스트" : tab === "log" || tab === "ilji" || tab === "ref" ? "일지" : tab === "bill" ? "명세서" : tab === "settings" ? "설정" : "참고"}</h1>
               <button className="gear" type="button" aria-label="설정" onClick={() => setTab(tab === "settings" ? "entry" : "settings")}>⚙</button>
             </div>
             <div className="sync-line"><span className={`sync-dot ${dot}`} /> {syncText}</div>
@@ -112,7 +125,7 @@ export function App() {
         {tab === "list" && <ListScreen />}
         {tab === "log" && <ExcelScreen part="log" />}
         {tab === "bill" && <ExcelScreen part="bill" />}
-        {tab === "ref" && <RefScreen />}
+        {(tab === "ilji" || tab === "ref") && <JournalTab part={tab} onPart={setTab} />}
         {tab === "settings" && (
           <>
             <SettingsScreen key={session.config.clientId + session.account} />
@@ -124,7 +137,7 @@ export function App() {
       {tab !== "settings" && (
         <nav className="tabbar">
           <button type="button" className={tab === "entry" ? "on" : ""} onClick={() => setTab("entry")}><span>▦</span>입력</button>
-          <button type="button" className={tab === "ref" ? "on" : ""} onClick={() => setTab("ref")}><span>Ø</span>참고</button>
+          <button type="button" className={tab === "ilji" || tab === "ref" ? "on" : ""} onClick={() => setTab("ilji")}><span>✎</span>일지</button>
           <button type="button" className={tab === "list" ? "on" : ""} onClick={() => setTab("list")}><span>▤</span>리스트</button>
           <button type="button" className={tab === "bill" ? "on" : ""} onClick={() => setTab("bill")}><span>₩</span>명세서</button>
         </nav>

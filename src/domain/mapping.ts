@@ -115,6 +115,12 @@ export function isRemovedSite(site: string | undefined | null): boolean {
   return !!site && REMOVED_SITE_KEYS.has(site.replace(/\s+/g, ""));
 }
 
+/** 작업일지 칸 글자에 지운 현장이 보이는가. 예: 머리글 '지성 브레인연계', '그 외' 관경 '150A(드림화양)', '200A(택지)'. */
+export function mentionsRemovedSite(text: string): boolean {
+  const norm = text.replace(/\s+/g, "");
+  return ["브레인", "택지", "화양"].some((word) => norm.includes(word));
+}
+
 /** 지운 현장의 예전 설정. 같은 작업일지 열('그 외')을 쓰는 다른 현장을 다시 쓸 때 그 칸 값을 그대로 두려고 남긴다. */
 export const REMOVED_SITE_MAPPINGS: readonly SiteMapping[] = [
     {

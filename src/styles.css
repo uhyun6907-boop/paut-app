@@ -605,3 +605,20 @@ button.mini strong { color: var(--text); font-size: 15px; font-weight: 800; }
 .xg-menu.up { top: auto; bottom: 0; }
 .xg-menu .btn.small { min-height: 32px; padding: 4px 10px; }
 .xg-norec { padding: 4px 2px; font-size: 11px; color: var(--muted); }
+.tab-segment { margin-bottom: 8px; }
+.ilji-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.ilji-bar .btn.small { min-height: 34px; padding: 4px 10px; }
+.ilji-month { flex: 1; min-height: 34px; text-align: center; }
+.ilji-hint { margin: 2px 2px 6px; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.xg.ilji { font-size: 11px; }
+.xg.ilji th, .xg.ilji td { height: 24px; padding: 0 4px; }
+.xg.ilji thead th { height: 22px; font-size: 11px; }
+.xg.ilji thead tr:nth-child(2) th { top: 22px; }
+.xg.ilji td.k-dia, .xg.ilji td.k-count, .xg.ilji td.k-time, .xg.ilji td.c-A, .xg.ilji td.c-C { text-align: center; }
+.xg.ilji td.c-U { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.xg.ilji tr.day td { border-top: 1px solid #c8ccd2; }
+.xg.ilji td.ex { color: #8e8e93; }
+.xg.ilji .xg-cb { height: 23px; padding: 0 4px; text-align: inherit; }
+.xg-pop-title { font-size: 11px; font-weight: 700; color: var(--muted); }
+.xg-wrap.ilji-edit { min-height: 300px; }
+.xg.ilji .xg-pop { width: 200px; min-width: 0; }

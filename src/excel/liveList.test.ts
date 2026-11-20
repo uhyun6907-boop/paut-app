@@ -175,11 +175,11 @@ describe("리스트 탭 · OneDrive 검사리스트 바로 보기·고치기", (
     expect(reason).toMatch(/로그인|OneDrive/);
   });
 
-  it("세 번째 탭은 리스트, 작업일지(일지) 화면은 설정에서 그대로 열 수 있다. 참고·명세서 탭은 그대로", () => {
+  it("두 번째 탭은 일지(근무일지 | 참고), 세 번째 탭은 리스트, 작업일지 미리보기는 설정에서 그대로 열 수 있다. 명세서 탭은 그대로", () => {
     const app = readFileSync(new URL("../ui/App.tsx", import.meta.url), "utf8");
     const tabbar = app.slice(app.indexOf('<nav className="tabbar">'), app.indexOf("</nav>"));
     const labels = [...tabbar.matchAll(/<\/span>([^<]+)<\/button>/g)].map((m) => m[1]);
-    expect(labels).toEqual(["입력", "참고", "리스트", "명세서"]);
+    expect(labels).toEqual(["입력", "일지", "리스트", "명세서"]);
     expect(app).toContain('{tab === "log" && <ExcelScreen part="log" />}');
     expect(app).toMatch(/onClick=\{\(\) => setTab\("log"\)\}>작업일지 미리보기<\/button>/);
   });
