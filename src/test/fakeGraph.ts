@@ -40,6 +40,11 @@ export interface LogEntry {
   body?: unknown;
 }
 
+/** 서식 요청(범위 서식·글꼴·채우기·테두리·표시 형식). 값 쓰기와 가른다. */
+export function isFormatRequest(e: LogEntry): boolean {
+  return e.path.includes("/format") || !!(e.body as { numberFormat?: unknown } | undefined)?.numberFormat;
+}
+
 interface Item {
   name: string;
   files: ZipFiles;
@@ -59,6 +64,8 @@ export class FakeDrive {
   /** 순서 확인용 사건 목록(토큰 받기·요청). */
   events: string[] = [];
   private sessionNo = 0;
+  private formatEdits = new Map<string, FormatEdit>();
+  private rowHeightEdits = new Map<string, number>();
   private sharedCache = new WeakMap<Uint8Array, string[]>();
 
   put(id: string, name: string, bytes: Uint8Array): void {
@@ -102,6 +109,114 @@ export class FakeDrive {
     return this.log.filter(filter);
   }
 
+  /** Graph 가 돌려줄 칸 서식(파일의 s → styles.xml, 그 위에 서식 PATCH). */
+  cellFormat(itemId: string, sheetName: string, ref: string): CellFormat {
+    const files = this.files(itemId);
+    const sheet = workbookSheets(files).find((s) => s.name === sheetName)!;
+    return this.formatOf(itemId, files, sheet.path, ref);
+  }
+
+  rowHeight(itemId: string, sheetName: string, row: number): number {
+    const files = this.files(itemId);
+    const sheet = workbookSheets(files).find((s) => s.name === sheetName)!;
+    return this.heightOf(itemId, files, sheet.path, row);
+  }
+
+  private formatOf(itemId: string, files: ZipFiles, path: string, ref: string): CellFormat {
+    const base = xfFormat(files, xmlText(files, path), ref);
+    const edit = this.formatEdits.get(`${itemId}|${path}|${ref}`) ?? {};
+    return {
+      numberFormat: edit.numberFormat ?? base.numberFormat,
+      format: { ...base.format, ...edit.format },
+      font: { ...base.font, ...edit.font },
+      fill: edit.fill ?? base.fill,
+      borders: { ...base.borders, ...edit.borders },
+    };
+  }
+
+  private heightOf(itemId: string, files: ZipFiles, path: string, row: number): number {
+    const edited = this.rowHeightEdits.get(`${itemId}|${path}|${row}`);
+    if (edited !== undefined) return edited;
+    const xml = xmlText(files, path);
+    const ht = new RegExp(`<row r="${row}"[^>]*?\\sht="([\\d.]+)"`).exec(xml)?.[1] ?? /defaultRowHeight="([\d.]+)"/.exec(xml)?.[1];
+    return Number(ht ?? 15);
+  }
+
+  private editFormat(itemId: string, path: string, ref: string, edit: (e: FormatEdit) => void): void {
+    const key = `${itemId}|${path}|${ref}`;
+    const e = this.formatEdits.get(key) ?? {};
+    edit(e);
+    this.formatEdits.set(key, e);
+  }
+
+  private async batch(init: RequestInit, headers: Headers): Promise<Response> {
+    const { requests } = JSON.parse(String(init.body)) as { requests: BatchItem[] };
+    if (requests.length > 20) return err(400, "TooManyRequestsInBatch");
+    const responses: { id: string; status: number; body?: unknown }[] = [];
+    for (const r of requests) {
+      if (r.dependsOn?.some((id) => (responses.find((x) => x.id === id)?.status ?? 0) >= 300)) {
+        responses.push({ id: r.id, status: 424 });
+        continue;
+      }
+      const res = await this.fetch(GRAPH + r.url, {
+        method: r.method,
+        headers: { ...r.headers, Authorization: headers.get("Authorization") ?? "" },
+        body: r.body === undefined ? undefined : JSON.stringify(r.body),
+      });
+      const text = await res.text();
+      responses.push({ id: r.id, status: res.status, body: text ? JSON.parse(text) : undefined });
+    }
+    return json({ responses });
+  }
+
+  private rangeFormat(method: string, itemId: string, files: ZipFiles, path: string, address: string, part: string, side: string | undefined, body: unknown): Response {
+    const box = parseAddress(address);
+    const refs: string[] = [];
+    for (let r = box.r1; r <= box.r2; r++) for (let c = box.c1; c <= box.c2; c++) refs.push(columnLetter(c) + r);
+    const first = this.formatOf(itemId, files, path, refs[0]);
+    if (method === "GET") {
+      if (part === "") return json({ ...first.format, rowHeight: this.heightOf(itemId, files, path, box.r1) });
+      if (part === "/font") return json(first.font);
+      if (part === "/fill") return json({ color: first.fill });
+      if (part === "/borders") return json({ value: Object.entries(first.borders).map(([sideIndex, b]) => ({ sideIndex, ...b })) });
+    }
+    if (method === "POST" && part === "/fill/clear") {
+      for (const ref of refs) this.editFormat(itemId, path, ref, (e) => (e.fill = "#FFFFFF"));
+      return new Response(null, { status: 200 });
+    }
+    if (method === "PATCH" && part === "") {
+      const { rowHeight, ...format } = body as CellFormat["format"] & { rowHeight?: number };
+      for (const ref of refs) this.editFormat(itemId, path, ref, (e) => (e.format = { ...e.format, ...format }));
+      if (rowHeight !== undefined) for (let r = box.r1; r <= box.r2; r++) this.rowHeightEdits.set(`${itemId}|${path}|${r}`, rowHeight);
+      return json({});
+    }
+    if (method === "PATCH" && part === "/font") {
+      for (const ref of refs) this.editFormat(itemId, path, ref, (e) => (e.font = { ...e.font, ...(body as CellFormat["font"]) }));
+      return json({});
+    }
+    if (method === "PATCH" && part === "/fill") {
+      for (const ref of refs) this.editFormat(itemId, path, ref, (e) => (e.fill = (body as { color: string }).color));
+      return json({});
+    }
+    if (method === "PATCH" && part === "/borders" && side) {
+      const border = body as Border;
+      for (let r = box.r1; r <= box.r2; r++) {
+        for (let c = box.c1; c <= box.c2; c++) {
+          const touched: string[] = [];
+          if (side === "EdgeTop" && r === box.r1) touched.push("EdgeTop");
+          if (side === "EdgeBottom" && r === box.r2) touched.push("EdgeBottom");
+          if (side === "EdgeLeft" && c === box.c1) touched.push("EdgeLeft");
+          if (side === "EdgeRight" && c === box.c2) touched.push("EdgeRight");
+          if (side === "InsideVertical") touched.push(...(c < box.c2 ? ["EdgeRight"] : []), ...(c > box.c1 ? ["EdgeLeft"] : []));
+          if (side === "InsideHorizontal") touched.push(...(r < box.r2 ? ["EdgeBottom"] : []), ...(r > box.r1 ? ["EdgeTop"] : []));
+          for (const t of touched) this.editFormat(itemId, path, columnLetter(c) + r, (e) => (e.borders = { ...e.borders, [t]: border }));
+        }
+      }
+      return json({});
+    }
+    return err(400, `fake graph: unsupported ${method} format${part}`);
+  }
+
   fetch = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const method = (init.method ?? "GET").toUpperCase();
@@ -137,6 +252,7 @@ export class FakeDrive {
       if (fault.retryAfter != null) h["Retry-After"] = String(fault.retryAfter);
       return err(fault.status, `fake ${fault.status}`, h);
     }
+    if (path === "/$batch" && method === "POST") return this.batch(init, headers);
     if (/^\/me\/drive\/root\/children(\?|$)/.test(path) && method === "GET") {
       return json({ value: [...this.items.entries()].map(([id, it]) => ({ id, name: it.name, file: {} })) });
     }
@@ -231,6 +347,14 @@ export class FakeDrive {
       if (!r2) return json({ address: `${q}!${columnLetter(box.c1)}${box.r1}` });
       return json({ address: `${q}!${columnLetter(c1)}${r1}:${columnLetter(c2)}${r2}` });
     }
+    const format = /^\/workbook\/worksheets\/([^/]+)\/range\(address='([^']+)'\)\/format(\/font|\/fill\/clear|\/fill|\/borders)?(?:\/(\w+))?(\?.*)?$/.exec(rest);
+    if (format) {
+      const sheet = workbookSheets(item.files).find((s) => sheetId(s.path) === format[1]);
+      if (!sheet) return err(404, "ItemNotFound");
+      const body = typeof init.body === "string" ? JSON.parse(init.body) : undefined;
+      if (body) this.log[this.log.length - 1].body = body;
+      return this.rangeFormat(method, itemId, item.files, sheet.path, format[2], format[3] ?? "", format[4], body);
+    }
     const range = /^\/workbook\/worksheets\/([^/]+)\/range\(address='([^']+)'\)(\/insert)?(\?.*)?$/.exec(rest);
     if (range) {
       const sheet = workbookSheets(item.files).find((s) => sheetId(s.path) === range[1]);
@@ -261,13 +385,22 @@ export class FakeDrive {
           values.push(row);
           formulas.push(frow);
         }
-        return json({ address: range[2], values, formulas });
+        const numberFormat = /\$select=[^&]*numberFormat/.test(range[4] ?? "")
+          ? values.map((row, i) => row.map((_, j) => this.formatOf(itemId, item.files, sheet.path, columnLetter(box.c1 + j) + (box.r1 + i)).numberFormat))
+          : undefined;
+        return json({ address: range[2], values, formulas, numberFormat });
       }
       if (method === "PATCH") {
         const ifMatch = headers.get("If-Match");
         if (ifMatch && ifMatch !== etag(itemId, item.version)) return err(412, "resourceModified");
-        const body = JSON.parse(String(init.body)) as { formulas?: (string | number | null)[][]; values?: (string | number | null)[][] };
+        const body = JSON.parse(String(init.body)) as { formulas?: (string | number | null)[][]; values?: (string | number | null)[][]; numberFormat?: string[][] };
         this.log[this.log.length - 1].body = body;
+        if (body.numberFormat) {
+          const nf = body.numberFormat;
+          if (nf.length !== box.r2 - box.r1 + 1 || nf.some((row) => row.length !== box.c2 - box.c1 + 1)) return err(400, "numberFormat dimensions");
+          nf.forEach((row, i) => row.forEach((f, j) => this.editFormat(itemId, sheet.path, columnLetter(box.c1 + j) + (box.r1 + i), (e) => (e.numberFormat = f))));
+          return json({ address: range[2] });
+        }
         const grid = body.formulas ?? body.values ?? [];
         if (grid.length !== box.r2 - box.r1 + 1 || grid.some((row) => row.length !== box.c2 - box.c1 + 1)) {
           return err(400, "The number of rows or columns in the input array doesn't match the size or dimensions of the range.");
@@ -332,4 +465,88 @@ function err(status: number, message: string, headers: Record<string, string> = 
     status,
     headers: { "Content-Type": "application/json", ...headers },
   });
+}
+
+interface BatchItem {
+  id: string;
+  method: string;
+  url: string;
+  headers?: Record<string, string>;
+  body?: unknown;
+  dependsOn?: string[];
+}
+
+interface Border {
+  style: string;
+  color?: string;
+  weight?: string;
+}
+
+export interface CellFormat {
+  numberFormat: string;
+  format: { horizontalAlignment: string; verticalAlignment: string; wrapText: boolean };
+  font: { name: string; size: number; bold: boolean; italic: boolean; color: string; underline: string };
+  fill: string;
+  borders: Record<string, Border>;
+}
+
+type FormatEdit = Partial<Omit<CellFormat, "borders">> & { borders?: Record<string, Border> };
+
+const BORDER_STYLE: Record<string, Border> = {
+  thin: { style: "Continuous", color: "#000000", weight: "Thin" },
+  medium: { style: "Continuous", color: "#000000", weight: "Medium" },
+  thick: { style: "Continuous", color: "#000000", weight: "Thick" },
+  hair: { style: "Continuous", color: "#000000", weight: "Hairline" },
+  dotted: { style: "Dot", color: "#000000", weight: "Thin" },
+  dashed: { style: "Dash", color: "#000000", weight: "Thin" },
+  double: { style: "Double", color: "#000000", weight: "Thick" },
+};
+
+const capitalize = (s: string | undefined, fallback: string) => (s ? s[0].toUpperCase() + s.slice(1) : fallback);
+
+/** 엑셀처럼 칸 s → 행 서식(customFormat) → 열 기본 서식 순으로 정해지는 서식을 Graph 값 모양으로. */
+function xfFormat(files: ZipFiles, sheetXml: string, ref: string): CellFormat {
+  const [, colLetters, row] = /^([A-Z]+)(\d+)$/.exec(ref)!;
+  const cellAttrs = new RegExp(`<c r="${ref}"([^>]*?)/?>`).exec(sheetXml)?.[1];
+  const rowAttrs = new RegExp(`<row r="${row}"([^>]*?)/?>`).exec(sheetXml)?.[1] ?? "";
+  const col = columnIndex(colLetters);
+  const colStyle = [...(/<cols>([\s\S]*?)<\/cols>/.exec(sheetXml)?.[1] ?? "").matchAll(/<col\b([^>]*)\/?>/g)]
+    .find((c) => col >= Number(/\bmin="(\d+)"/.exec(c[1])?.[1]) && col <= Number(/\bmax="(\d+)"/.exec(c[1])?.[1]))?.[1];
+  const sOf = (attrs: string | undefined) => (attrs ? /(?:^|\s)(?:s|style)="(\d+)"/.exec(attrs)?.[1] : undefined);
+  const s = Number(
+    (cellAttrs !== undefined ? sOf(cellAttrs) : undefined) ??
+      (cellAttrs === undefined && /\bcustomFormat="(1|true)"/.test(rowAttrs) ? sOf(rowAttrs) : undefined) ??
+      (cellAttrs === undefined ? sOf(colStyle) : undefined) ??
+      0,
+  );
+  const styles = xmlText(files, "xl/styles.xml");
+  const section = (name: string, item: string) =>
+    [...(new RegExp(`<${name}\\b[^>]*>([\\s\\S]*?)</${name}>`).exec(styles)?.[1] ?? "").matchAll(new RegExp(`<${item}\\b[^>]*?(?:/>|>[\\s\\S]*?</${item}>)`, "g"))].map((m) => m[0]);
+  const xf = section("cellXfs", "xf")[s] ?? "";
+  const id = (name: string) => Number(new RegExp(`\\b${name}="(\\d+)"`).exec(xf)?.[1] ?? 0);
+  const align = /<alignment\b([^>]*)\/>/.exec(xf)?.[1] ?? "";
+  const font = section("fonts", "font")[id("fontId")] ?? "";
+  const fill = section("fills", "fill")[id("fillId")] ?? "";
+  const border = section("borders", "border")[id("borderId")] ?? "";
+  const numFmtId = id("numFmtId");
+  const side = (name: string): Border => BORDER_STYLE[new RegExp(`<${name}\\b[^>]*style="(\\w+)"`).exec(border)?.[1] ?? ""] ?? { style: "None" };
+  const rgb = /patternType="solid"/.test(fill) ? /<fgColor\b[^>]*rgb="(\w+)"/.exec(fill)?.[1] : undefined;
+  return {
+    numberFormat: numFmtId === 0 ? "General" : new RegExp(`<numFmt numFmtId="${numFmtId}" formatCode="([^"]*)"`).exec(styles)?.[1] ?? `builtin-${numFmtId}`,
+    format: {
+      horizontalAlignment: capitalize(/horizontal="(\w+)"/.exec(align)?.[1], "General"),
+      verticalAlignment: capitalize(/vertical="(\w+)"/.exec(align)?.[1], "Bottom"),
+      wrapText: /wrapText="1"/.test(align),
+    },
+    font: {
+      name: /<name val="([^"]*)"/.exec(font)?.[1] ?? "",
+      size: Number(/<sz val="([\d.]+)"/.exec(font)?.[1] ?? 11),
+      bold: /<b\/>/.test(font),
+      italic: /<i\/>/.test(font),
+      color: "#000000",
+      underline: /<u\b/.test(font) ? "Single" : "None",
+    },
+    fill: rgb ? `#${rgb.slice(-6)}` : "#FFFFFF",
+    borders: { EdgeTop: side("top"), EdgeBottom: side("bottom"), EdgeLeft: side("left"), EdgeRight: side("right") },
+  };
 }

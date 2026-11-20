@@ -521,6 +521,17 @@ export class GraphClient {
 
 export type GraphCell = string | number | null;
 
+export interface BatchRequest {
+  method: "GET" | "PATCH" | "POST";
+  url: string;
+  body?: unknown;
+}
+
+export interface BatchResponse {
+  status: number;
+  body?: unknown;
+}
+
 /** 통합 문서 세션. 셀 단위로 읽고 쓴다(파일 전체를 바꾸지 않는다). */
 export class WorkbookSession {
   readonly client: GraphClient;
@@ -576,6 +587,31 @@ export class WorkbookSession {
       { method: "POST", body: JSON.stringify({ shift: "Down" }) },
       { sessionId: this.id, idempotent: false },
     );
+  }
+
+  /**
+   * JSON 배치(한 번에 20개까지). sequential 이면 앞 요청이 끝난 뒤 다음 요청(같은 통합 문서에 쓰기는 하나씩),
+   * 앞 요청이 실패하면 뒤 요청은 424. 돌려주는 값은 requests 와 같은 순서.
+   */
+  async batch(requests: BatchRequest[], sequential: boolean): Promise<BatchResponse[]> {
+    const out: BatchResponse[] = [];
+    for (let start = 0; start < requests.length; start += 20) {
+      const chunk = requests.slice(start, start + 20).map((r, i) => ({
+        id: String(i + 1),
+        method: r.method,
+        url: r.url.slice(GRAPH.length),
+        headers: { "workbook-session-id": this.id, ...(r.body ? { "Content-Type": "application/json" } : {}) },
+        ...(r.body ? { body: r.body } : {}),
+        ...(sequential && i > 0 ? { dependsOn: [String(i)] } : {}),
+      }));
+      const json = await this.client.json<{ responses?: { id: string; status: number; body?: unknown }[] }>(`${GRAPH}/$batch`, {
+        method: "POST",
+        body: JSON.stringify({ requests: chunk }),
+      });
+      const byId = new Map((json.responses ?? []).map((r) => [r.id, r]));
+      for (const r of chunk) out.push({ status: byId.get(r.id)?.status ?? 0, body: byId.get(r.id)?.body });
+    }
+    return out;
   }
 
   async close(): Promise<void> {

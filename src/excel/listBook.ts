@@ -3,7 +3,7 @@ import { comparePointLabel } from "../domain/point";
 import { diameterFromLine, excelRight4 } from "../domain/size";
 import type { InspectionRecord, ListBookKind } from "../domain/types";
 import { LIST_GM_SHEETS } from "../domain/types";
-import { cellText, parseCells, readSheet, setCell, setXml, sharedStrings, workbookSheets, xmlText, type ZipFiles } from "./ooxml";
+import { cellText, copyRowStyle, parseCells, readSheet, setCell, setXml, sharedStrings, workbookSheets, xmlText, type ZipFiles } from "./ooxml";
 
 const COL = {
   seq: "A",
@@ -263,6 +263,7 @@ export function writeListRow(files: ZipFiles, sheetName: string, input: ListWrit
     setXml(files, info.path, next);
     return row;
   }
+  const appended = !row;
   if (!row) row = nextEmptyLineRow(cells);
   const seqCell = cells.get("A" + row);
   const seq = seqCell?.v && /^\d+$/.test(seqCell.v) ? Number(seqCell.v) : maxSeq(cells) + 1;
@@ -287,8 +288,20 @@ export function writeListRow(files: ZipFiles, sheetName: string, input: ListWrit
   }
   next = setCell(next, COL.result + row, { kind: "inline", text: input.result });
   next = setCell(next, COL.appId + row, { kind: "inline", text: input.id });
+  if (appended) next = styleLikeRowAbove(next, row);
   setXml(files, info.path, next);
   return row;
+}
+
+function styleLikeRowAbove(xml: string, row: number): string {
+  const aboveIsData = row - 1 >= 6;
+  return aboveIsData ? copyRowStyle(xml, row - 1, row) : xml;
+}
+
+/** OneDrive 에 새로 붙인 행을 로컬 사본에도 같은 서식으로. */
+export function styleAppendedRow(files: ZipFiles, sheetName: string, row: number): void {
+  const { path } = readSheet(files, sheetName).info;
+  setXml(files, path, styleLikeRowAbove(xmlText(files, path), row));
 }
 
 function findRowByAppId(cells: Map<string, { col: string; row: number; v?: string }>, id: string): number | null {

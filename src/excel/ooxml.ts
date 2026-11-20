@@ -162,6 +162,31 @@ export function setCell(xml: string, ref: string, spec: CellSpec): string {
   return xml.slice(0, row.index) + nextRow + xml.slice(row.index + row[0].length);
 }
 
+const ROW_FORMAT_ATTRS = ["ht", "customHeight", "s", "customFormat"];
+
+/** toRow 의 칸마다 fromRow 같은 열 칸의 서식(s)을, 행에는 fromRow 의 높이·행 서식을 입힌다. 값은 그대로. */
+export function copyRowStyle(xml: string, fromRow: number, toRow: number): string {
+  const from = new RegExp(`<row r="${fromRow}"([^>]*?)(?:/>|>([\\s\\S]*?)</row>)`).exec(xml);
+  if (!from) return xml;
+  let next = xml;
+  for (const c of (from[2] ?? "").matchAll(/<c r="([A-Z]+)\d+"([^>]*?)\/?>/g)) {
+    const style = /(?:^|\s)s="(\d+)"/.exec(c[2])?.[1];
+    if (!style) continue;
+    const ref = c[1] + toRow;
+    const cellRe = new RegExp(`<c r="${ref}"([^>]*?)(/?>)`);
+    if (!cellRe.test(next)) next = setCell(next, ref, { kind: "empty" });
+    next = next.replace(cellRe, (_all, attrs: string, end: string) => `<c r="${ref}" s="${style}"${attrs.replace(/\s+s="\d+"/, "")}${end}`);
+  }
+  const copied = ROW_FORMAT_ATTRS.flatMap((name) => {
+    const value = new RegExp(`\\s${name}="([^"]*)"`).exec(from[1])?.[1];
+    return value === undefined ? [] : [` ${name}="${value}"`];
+  }).join("");
+  return next.replace(new RegExp(`<row r="${toRow}"([^>]*?)(/?>)`), (_all, attrs: string, end: string) => {
+    const kept = ROW_FORMAT_ATTRS.reduce((a, name) => a.replace(new RegExp(`\\s${name}="[^"]*"`), ""), attrs);
+    return `<row r="${toRow}"${kept}${copied}${end}`;
+  });
+}
+
 /** <cols> 의 열 기본 서식 */
 function columnStyle(xml: string, col: number): string | undefined {
   const cols = /<cols>([\s\S]*?)<\/cols>/.exec(xml)?.[1];

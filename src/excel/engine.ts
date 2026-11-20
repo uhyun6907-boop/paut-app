@@ -4,11 +4,12 @@ import type { AppConfig, DayMeta, DayStaff, FileSteps, InspectionRecord, ListBoo
 import { FAIL, LIST_BOOKS, LIST_BOOK_LABEL, LIST_GM_FILE, PASS, SYNC_FILE_LABEL } from "../domain/types";
 import { findMonthSheet, isRemovedSite, mappingFor, REMOVED_SITE_MAPPINGS } from "../domain/mapping";
 import { readDayStaff, readInspectors, readWorkLog, applyIljiDay, findIljiSheet, readIljiDay, type IljiGroup, type WorkLogDay } from "./iljiBook";
-import { appIdRows, LIST_LAYOUT, listBookOf, listDiameterValue, listSheetOf, orderForAppend, parseListWorkbook, planLineReorder, writeListRow, type ListWrite } from "./listBook";
+import { appIdRows, LIST_LAYOUT, listBookOf, listDiameterValue, listSheetOf, orderForAppend, parseListWorkbook, planLineReorder, styleAppendedRow, writeListRow, type ListWrite } from "./listBook";
 import { dropCalcChain, readSheet, shiftRowNumbers, unzipXlsx, workbookSheets, zipXlsx, type ZipFiles } from "./ooxml";
 import { expectedMonthSheetName, readLengths, readPautRows, writePautLines, type PautLine, type SheetOwnership } from "./statementBook";
 import { diffSheet, toRangeWrites } from "./cellDiff";
 import { GraphError, listRowFormulas, type GraphClient, type WorkbookSession } from "../sync/graph";
+import { copyRowFormat } from "../sync/rowFormat";
 
 /** 이 기기에 사본을 두는 통합 문서. 검사리스트는 두 파일(평택 list, 군포·마전 listGm). */
 export type BookKind = SyncFile | "listGm";
@@ -596,6 +597,7 @@ async function listBookStep(
         const v = row?.[0];
         if (v !== null && v !== undefined && String(v).trim() !== "") last = 6 + i;
       });
+      const lastBefore = last;
       const byId = new Map<string, number>();
       colY.forEach((row, i) => {
         const v = row?.[0];
@@ -648,7 +650,7 @@ async function listBookStep(
       const moves = planLineReorder(byId, sheetMates(args.all, book, sheetName));
       const mates = [...moves.values()].map((m) => m.rec).filter((r) => !group.includes(r));
       const ordered = [...group.filter((rec) => known(rec)), ...fresh];
-      const writeAt = async (rec: InspectionRecord, target: number, reorder: boolean) => {
+      const writeAt = async (rec: InspectionRecord, target: number, reorder: boolean, appended = false) => {
         const input = toWrite(rec);
         const options =
           layout.diameter === "value"
@@ -664,7 +666,7 @@ async function listBookStep(
         }
         run.excelRows.set(rec.id, target);
         rec.excelRow = target;
-        mirrorListLocally(rec, target);
+        mirrorListLocally(rec, target, appended);
       };
       for (const rec of mates) await writeAt(rec, moves.get(rec.id)!.row, true);
       for (const rec of mates) byId.set(rec.id, moves.get(rec.id)!.row);
@@ -676,15 +678,19 @@ async function listBookStep(
           remaining.delete(rec);
           continue;
         }
+        const appended = !target;
         if (!target) {
           last += 1;
           target = last;
         }
-        await writeAt(rec, target, moves.has(rec.id));
+        await writeAt(rec, target, moves.has(rec.id), appended);
         byId.set(rec.id, target);
         run.mark([rec], "list", "done");
         remaining.delete(rec);
         written += 1;
+      }
+      if (last > lastBefore && lastBefore >= 6) {
+        await copyRowFormat(wb!, ws.id, lastBefore, lastBefore + 1, last).catch((error) => console.warn(`${listLabel(book)} '${sheetName}' 새 행 서식 복사 실패(값은 저장됨)`, error));
       }
     }
     run.listOk(book, written);
@@ -728,14 +734,15 @@ async function openListWorkbook(client: GraphClient, file: { id: string; name: s
 }
 
 /** 앱 화면의 엑셀 미리보기용 사본에도 같은 행을 쓴다. 실패해도 동기화와는 상관없다. */
-function mirrorListLocally(rec: InspectionRecord, row: number): void {
+function mirrorListLocally(rec: InspectionRecord, row: number, appended: boolean): void {
   const book = listBookOf(rec);
   const files = work[book];
   if (!files) return;
   try {
     const sheet = workbookSheets(files).find((x) => x.name.trim() === listSheetOf(rec));
-    // OneDrive 에 쓴 행 번호 그대로(미리보기 사본의 마지막 행이 달라도 같은 자리).
-    if (sheet) writeListRow(files, sheet.name, { ...toWrite(rec), excelRow: row, atRow: row }, LIST_LAYOUT[book]);
+    if (!sheet) return;
+    writeListRow(files, sheet.name, { ...toWrite(rec), excelRow: row, atRow: row }, LIST_LAYOUT[book]);
+    if (appended) styleAppendedRow(files, sheet.name, row);
   } catch {
     /* 미리보기 사본 */
   }

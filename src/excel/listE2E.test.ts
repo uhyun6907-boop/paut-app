@@ -10,7 +10,7 @@ import { comparePointLabel } from "../domain/point";
 import type { InspectionRecord, ListBookKind } from "../domain/types";
 import { FAIL, PASS } from "../domain/types";
 import { GraphClient, graphRetry } from "../sync/graph";
-import type { FakeDrive } from "../test/fakeGraph";
+import { isFormatRequest, type FakeDrive } from "../test/fakeGraph";
 import { LIST_GM_ID, LIST_ID, STMT_ID, ILJI_ID, fixture, graphConfig, meta, realDrive, realGmRecords, realListRecords, rec } from "../test/realBooks";
 import { bootstrapFromSamples, exportBook, restoreStatementOwnership, syncGraph, syncPendingDemo } from "./engine";
 import { readIljiDay } from "./iljiBook";
@@ -241,7 +241,7 @@ describe("검사리스트 끝까지(OneDrive·Graph): 실제 두 리스트", () 
     expect(gpNov?.count).toBe(3);
 
     // 리스트 쓰기는 행 하나씩 A:Y 범위, 통합 문서 세션 안. 파일 업로드(PUT) 없음.
-    const listPatches = drive.requests((e) => (e.item === LIST_ID || e.item === LIST_GM_ID) && e.method === "PATCH");
+    const listPatches = drive.requests((e) => (e.item === LIST_ID || e.item === LIST_GM_ID) && e.method === "PATCH" && !isFormatRequest(e));
     expect(listPatches).toHaveLength(jobs.length);
     expect(listPatches.every((e) => !!e.session && /range\(address='A\d+:Y\d+'\)/.test(e.path))).toBe(true);
     expect(JSON.stringify(listPatches.map((e) => e.body))).not.toContain("앱");

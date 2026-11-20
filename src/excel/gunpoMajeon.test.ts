@@ -8,7 +8,7 @@ import type { InspectionRecord } from "../domain/types";
 import { FAIL, LIST_GM_FILE, PASS } from "../domain/types";
 import { GraphClient, graphRetry, listRowFormulas } from "../sync/graph";
 import { syncPanelModel } from "../store/syncStatus";
-import { FakeDrive } from "../test/fakeGraph";
+import { FakeDrive, isFormatRequest } from "../test/fakeGraph";
 import {
   ILJI_ID,
   LIST_GM_ID,
@@ -36,7 +36,7 @@ import {
 } from "./engine";
 import { readIljiDay } from "./iljiBook";
 import { LIST_LAYOUT, listBookOf, parseListWorkbook, writeListRow } from "./listBook";
-import { readSheet, unzipXlsx, workbookSheets, xmlText, type ZipFiles } from "./ooxml";
+import { columnLetter, readSheet, unzipXlsx, workbookSheets, xmlText, type ZipFiles } from "./ooxml";
 import { readPautRows } from "./statementBook";
 
 beforeAll(() => {
@@ -225,7 +225,7 @@ describe("Graph 동기화: 네 번째 파일(군포·마전 리스트)", () => {
 
     // '앱' 은 어디에도 없다. 파일 통째 업로드(PUT)도 없다. 리스트 쓰기는 통합 문서 세션 안의 칸 쓰기.
     expect(allXml(gm)).not.toContain("앱");
-    const gmPatches = drive.requests((e) => e.item === LIST_GM_ID && e.method === "PATCH");
+    const gmPatches = drive.requests((e) => e.item === LIST_GM_ID && e.method === "PATCH" && !isFormatRequest(e));
     expect(gmPatches).toHaveLength(8);
     expect(gmPatches.every((e) => !!e.session && /range\(address='A\d+:Y\d+'\)/.test(e.path))).toBe(true);
     expect(JSON.stringify(gmPatches.map((e) => e.body))).not.toContain("앱");
@@ -361,5 +361,106 @@ describe("데모(이 기기 사본)도 같은 규칙", () => {
     expect(appRows(py, "list").map((r) => r.id)).toContain(jobs[2].id);
     expect(cells(gm, "지성 군포 PA").get("L134")?.f).toBeUndefined();
     expect(allXml(gm)).not.toContain("앱");
+  });
+});
+
+describe("새 행 서식은 바로 위 행과 같다(지성 마전 PA 313행: 손으로 만든 행)", () => {
+  const MJ = "지성 마전 PA";
+  const rowTag = (files: ZipFiles, row: number) => new RegExp(`<row r="${row}"([^>]*?)/?>`).exec(readSheet(files, MJ).xml)?.[1] ?? "";
+  const styles = (files: ZipFiles, row: number) => {
+    const body = new RegExp(`<row r="${row}"[^>]*>([\\s\\S]*?)</row>`).exec(readSheet(files, MJ).xml)?.[1] ?? "";
+    return Object.fromEntries([...body.matchAll(/<c r="([A-Z]+)\d+"([^>]*?)\/?>/g)].map((c) => [c[1], /\bs="(\d+)"/.exec(c[2])?.[1]]));
+  };
+  const height = (attrs: string) => [/\bht="([^"]*)"/.exec(attrs)?.[1], /\bcustomHeight="([^"]*)"/.exec(attrs)?.[1]];
+
+  it("로컬 사본: 새로 붙인 행은 313행의 칸 서식(s)과 행 높이를 받고, 이미 있는 행을 고치면 그 행 서식은 그대로", () => {
+    const files = unzipXlsx(fixture("real-list-gunpo-majeon.xlsx"));
+    const above = styles(files, 313);
+    expect(above).toMatchObject({ A: "39", C: "13", D: "14", H: "14", I: "29", J: "37", K: "45", L: "46", N: "45", P: "47" });
+    const row = writeListRow(files, MJ, { id: "app-1", date: "2026-11-17", line: MJ_LINE, point: "S30", result: PASS, material: "SPPS380" }, LIST_LAYOUT.listGm);
+    expect(row).toBe(314);
+    expect(styles(files, 314)).toMatchObject(above);
+    expect(height(rowTag(files, 314))).toEqual(["19.5", "1"]);
+    expect(["E", "F", "G", "K", "L", "P", "Y"].map((c) => v(files, MJ, `${c}314`))).toEqual([String(isoToExcelSerial("2026-11-17")), MJ_LINE, "S30", "SPPS380", "200A", PASS, "app-1"]);
+    expect(v(files, MJ, "C314")).toBe("");
+    expect(v(files, MJ, "N314")).toBe("");
+
+    const before = { styles: styles(files, 313), tag: rowTag(files, 313) };
+    writeListRow(files, MJ, { id: "app-2", date: "2026-11-17", line: MJ_LINE, point: "S31", result: FAIL, excelRow: 313 }, LIST_LAYOUT.listGm);
+    expect(v(files, MJ, "G313")).toBe("S31");
+    expect(styles(files, 313)).toEqual({ ...before.styles, Y: styles(files, 313).Y });
+    expect(rowTag(files, 313)).toBe(before.tag);
+  });
+
+  type Format = ReturnType<FakeDrive["cellFormat"]>;
+  const line = (b: Format["borders"][string]) => (b.style === "None" ? "None" : `${b.style}/${b.weight}`);
+  /** 엑셀은 위 칸 아래 테두리와 아래 칸 위 테두리 중 선이 있는 쪽을 그린다. */
+  const between = (upper: Format, lower: Format) => (line(upper.borders.EdgeBottom) !== "None" ? line(upper.borders.EdgeBottom) : line(lower.borders.EdgeTop));
+  const noTopBottom = (f: Format) => ({ ...f, borders: { EdgeLeft: f.borders.EdgeLeft, EdgeRight: f.borders.EdgeRight } });
+
+  function expectLooksLikeRowAbove(drive: FakeDrive, item: string, sheet: string, above: number, rows: number[]) {
+    const last = rows[rows.length - 1];
+    for (let c = 1; c <= 25; c++) {
+      const f = (r: number) => drive.cellFormat(item, sheet, columnLetter(c) + r);
+      const ref = f(above);
+      for (const r of rows) expect(noTopBottom(f(r)), `${sheet} ${columnLetter(c)}${r}`).toEqual(noTopBottom(ref));
+      for (const r of [above, ...rows.slice(0, -1)]) expect(between(f(r), f(r + 1)), `${sheet} ${columnLetter(c)}${r}↕`).toBe(between(ref, ref));
+      expect(line(f(last).borders.EdgeBottom)).toBe(line(ref.borders.EdgeBottom));
+    }
+    for (const r of rows) expect(drive.rowHeight(item, sheet, r)).toBe(drive.rowHeight(item, sheet, above));
+  }
+
+  const formatRows = (drive: FakeDrive) =>
+    drive
+      .requests((e) => isFormatRequest(e) && e.method !== "GET")
+      .map((e) => /address='[A-Z]+(\d+):[A-Z]+(\d+)'/.exec(e.path)!.slice(1).map(Number));
+
+  it("OneDrive: 새로 붙인 행(314~316)에만 313행 서식을 입힌다. 두 리스트 파일 모두, 기존 행에는 서식 요청이 없다", async () => {
+    const drive = realDrive();
+    const jobs = [mj("S30", PASS), mj("S31", FAIL), mj("R30", PASS), rec("S28", PASS)];
+    const out = await sync(drive, { jobs, all: [...realListRecords(), ...realGmRecords(), ...jobs] });
+    expect(out.report.lists).toMatchObject({ list: { status: "ok", count: 1 }, listGm: { status: "ok", count: 3 } });
+    expect([314, 315, 316].map((r) => v(drive.files(LIST_GM_ID), MJ, `G${r}`))).toEqual(["S30", "S31", "R30"]);
+
+    expect(drive.rowHeight(LIST_GM_ID, MJ, 314)).toBe(19.5);
+    expectLooksLikeRowAbove(drive, LIST_GM_ID, MJ, 313, [314, 315, 316]);
+    const gmWrites = drive.requests((e) => e.item === LIST_GM_ID && isFormatRequest(e) && e.method !== "GET");
+    expect(gmWrites.length).toBeGreaterThan(0);
+    expect(gmWrites.every((e) => e.path.includes("314:") && e.path.includes("316'"))).toBe(true);
+    expect(gmWrites.filter((e) => e.path.endsWith("/format")).every((e) => (e.body as { rowHeight: number }).rowHeight === 19.5)).toBe(true);
+    const gmReads = drive.requests((e) => e.item === LIST_GM_ID && isFormatRequest(e) && e.method === "GET");
+    expect(gmReads.every((e) => /address='[A-Z]+313(:Y313)?'/.test(e.path))).toBe(true);
+
+    const hjRow = out.excelRows.get(jobs[3].id)!;
+    const hjSheet = workbookSheets(drive.files(LIST_ID)).find((s) => s.name.trim() === "드림 합정주공")!.name;
+    expectLooksLikeRowAbove(drive, LIST_ID, hjSheet, hjRow - 1, [hjRow]);
+    expect(formatRows(drive).every(([from, to]) => (from === 314 && to === 316) || (from === hjRow && to === hjRow))).toBe(true);
+    expect(drive.requests((e) => e.path === "/$batch")).toHaveLength(2 * (6 + 3) - 1);
+  });
+
+  it("새 행이 없으면(같은 기록을 다시 보냄·기존 행 고침) 서식 요청을 보내지 않는다", async () => {
+    const drive = realDrive();
+    const first = [mj("S30", PASS)];
+    await sync(drive, { jobs: first, all: [...realGmRecords(), ...first] });
+    drive.log = [];
+    const again = [{ ...first[0], result: FAIL, steps: undefined }];
+    const out = await sync(drive, { jobs: again, all: [...realGmRecords(), ...again] });
+    expect(out.report.lists).toMatchObject({ listGm: { status: "ok", count: 1 } });
+    expect(v(drive.files(LIST_GM_ID), MJ, "P314")).toBe(FAIL);
+    expect(drive.requests((e) => isFormatRequest(e) || e.path === "/$batch")).toEqual([]);
+  });
+
+  it("서식 요청이 실패해도 값은 이미 쓰였고 리스트 단계는 완료", async () => {
+    const drive = realDrive();
+    drive.fail((m, p) => m === "PATCH" && p.includes("/format/font"), 500, Infinity);
+    const jobs = [mj("S30", PASS), mj("R30", PASS)];
+    const out = await sync(drive, { jobs, all: [...realGmRecords(), ...jobs] });
+    expect(out.report.lists).toMatchObject({ listGm: { status: "ok", count: 2 } });
+    for (const r of jobs) expect(out.steps.get(r.id)?.list?.status).toBe("done");
+    expect([314, 315].map((r) => [v(drive.files(LIST_GM_ID), MJ, `G${r}`), v(drive.files(LIST_GM_ID), MJ, `Y${r}`)])).toEqual([
+      ["S30", jobs[0].id],
+      ["R30", jobs[1].id],
+    ]);
+    expect(drive.requests((e) => e.path.includes("/format/font") && e.method === "PATCH" && e.status === 500).length).toBeGreaterThan(0);
   });
 });
