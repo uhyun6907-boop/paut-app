@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { isRemovedSite } from "../domain/mapping";
 import { LIST_BOOK_LABEL } from "../domain/types";
 import { cellText, isEditable, liveTarget, loadLiveList, matchRecord, recordPatch, writeLiveCell, LiveConflictError, type LiveCell, type LiveRow, type LiveTable } from "../excel/liveList";
@@ -6,7 +6,7 @@ import { fileOf } from "../excel/engine";
 import { CACHE_STALE_TEXT, REFRESHING_TEXT, openList, saveListCache, savedAtText, type CacheSlot, type ListView } from "./listLoad";
 import { FilterPanel, FilterBar } from "./ListFilterPanel";
 import { applyFilters, type ListFilters } from "./listFilter";
-import { CARD_PAGE, MODE_LABEL, groupByDate, pageRows, visibleColumns, type ColumnMode, type DateGroup } from "./listLayout";
+import { DATE_PAGE, MODE_LABEL, dotDate, shortLine, summarizeByDate, toggleDate, toggleEditing, toggleRow, verdictOf, visibleColumns, type ColumnMode, type DateFocus, type DateGroup } from "./listLayout";
 
 const MODE_KEY = "paut-list-columns";
 function readMode(): ColumnMode {
@@ -88,7 +88,7 @@ export function rowLabel(row: LiveRow): string {
     const cell = row.cells.find((c) => c.col === col);
     return cell ? cellText(cell).trim() : "";
   };
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(text("E")) ? text("E").slice(2).replace(/-/g, ".") : text("E");
+  const date = dotDate(text("E"));
   const point = text("G") || `${row.row}행`;
   return date ? `${point} (${date})` : point;
 }
@@ -123,110 +123,138 @@ export function sentNote(action: RowAction, row: LiveRow, rec: InspectionRecord 
   return !rec || rec.steps?.list?.status === "done" ? `${head} · 검사리스트에 반영됨` : `${head} · 엑셀에 아직 못 보냄(위 동기화 상태를 확인하세요)`;
 }
 
-/**
- * 행 카드 한 장(휴대폰용, 가로 스크롤 없음). 위: 순번·날짜·판정 / 가운데: 라인·포인트 크게 / 아래: 비고와(모든 열이면) 나머지 열.
- * 날짜 묶음이 「수정」 중일 때만 칸을 눌러 고치고, 리페어 처리·삭제 버튼이 보인다.
- * 바뀌지 않은 행은 다시 그리지 않는다(뒤에서 새로 읽어도 깜빡이지 않게).
- */
-const LiveRowCard = memo(function LiveRowCard(props: {
+/** 「수정」 중 연 행의 칸들(보이는 열)과 리페어 처리·삭제. 고칠 수 있는 칸만 눌린다. */
+function RowEditor(props: {
   row: LiveRow;
   cols: { col: string; title: string }[];
-  unlocked: boolean;
   record: InspectionRecord | null;
   editing: string | null;
   onCell: (cell: LiveCell) => void;
   onAction: (action: RowAction, row: LiveRow) => void;
 }) {
-  const { row, cols, unlocked, record, editing, onCell, onAction } = props;
-  const cellOf = (col: string) => row.cells.find((c) => c.col === col);
-  const seq = cellOf("A");
-  const result = cellOf("P");
-  const resultText = result ? cellText(result).trim() : "";
-  const verdict = /불|FAIL|REJ/i.test(resultText) ? "bad" : resultText ? "ok" : "";
-  const field = (col: string, title: string, cls = "") => {
-    const cell = cellOf(col);
-    if (!cell) return null;
-    const editable = unlocked && isEditable(cell);
-    const text = cellText(cell);
-    return (
-      <button
-        key={col}
-        type="button"
-        className={`lc-f ${cls}${unlocked && !editable ? " ro" : ""}${editing === cell.address ? " on" : ""}`}
-        aria-label={`${title} ${cell.address}`}
-        disabled={!editable}
-        onClick={() => onCell(cell)}
-      >
-        <span className="lc-k">{title}</span>
-        <span className="lc-v">{text || "\u00a0"}</span>
-      </button>
-    );
-  };
-  const title = (col: string) => cols.find((c) => c.col === col)?.title ?? col;
-  const has = (col: string) => cols.some((c) => c.col === col);
-  const main = new Set(["E", "F", "G", "P"]);
+  const { row, cols, record, editing, onCell, onAction } = props;
   return (
-    <div className={`lc${verdict === "bad" ? " fail" : ""}`}>
-      <div className="lc-top">
-        <span className="lc-seq">{seq && cellText(seq) ? `#${cellText(seq)}` : ""}<small> {row.row}행</small></span>
-        {has("E") && field("E", title("E"), "date")}
-        {has("P") && field("P", title("P"), `verdict ${verdict}`)}
+    <div className="dr-edit">
+      <div className="dr-cells">
+        {cols.map(({ col, title }) => {
+          const cell = row.cells.find((c) => c.col === col);
+          if (!cell) return null;
+          const editable = isEditable(cell);
+          return (
+            <button
+              key={col}
+              type="button"
+              className={`lc-f${editable ? "" : " ro"}${editing === cell.address ? " on" : ""}`}
+              aria-label={`${title} ${cell.address}`}
+              disabled={!editable}
+              onClick={() => onCell(cell)}
+            >
+              <span className="lc-k">{title}</span>
+              <span className="lc-v">{cellText(cell) || "\u00a0"}</span>
+            </button>
+          );
+        })}
       </div>
-      <div className="lc-main">
-        {has("F") && field("F", title("F"), "line")}
-        {has("G") && field("G", title("G"), "point")}
+      <div className="lc-actions">
+        {record ? (
+          <>
+            <button className="btn small" type="button" disabled={record.result === FAIL} onClick={() => onAction("repair", row)}>리페어 처리</button>
+            <button className="btn small danger" type="button" onClick={() => onAction("delete", row)}>삭제</button>
+          </>
+        ) : (
+          <span className="lc-norec">앱 기록 없음 · 칸만 고칠 수 있음</span>
+        )}
       </div>
-      <div className="lc-rest">{cols.filter((c) => !main.has(c.col)).map((c) => field(c.col, c.title))}</div>
-      {unlocked && (
-        <div className="lc-actions">
-          {record ? (
-            <>
-              <button className="btn small" type="button" disabled={record.result === FAIL} onClick={() => onAction("repair", row)}>리페어 처리</button>
-              <button className="btn small danger" type="button" onClick={() => onAction("delete", row)}>삭제</button>
-            </>
-          ) : (
-            <span className="lc-norec">앱 기록 없음 · 칸만 고칠 수 있음</span>
-          )}
-        </div>
-      )}
     </div>
   );
-});
+}
 
-/** 검사 날짜 하나의 묶음. 「수정」을 누르기 전에는 읽기만 한다. */
-export function DateGroupCard(props: {
+/** 펼친 날짜의 행 한 칸: 포인트 · 합부 · 라인 번호 · 비고. */
+function RowLine({ row }: { row: LiveRow }) {
+  const text = (col: string) => {
+    const cell = row.cells.find((c) => c.col === col);
+    return cell ? cellText(cell).trim() : "";
+  };
+  const verdict = verdictOf(row);
+  return (
+    <>
+      <span className="dr-point">{text("G") || `${row.row}행`}</span>
+      <span className={`dr-verdict ${verdict}`}>{text("P") || "—"}</span>
+      <span className="dr-line">{[shortLine(text("F")), text("S")].filter(Boolean).join(" · ")}</span>
+    </>
+  );
+}
+
+/**
+ * 검사 날짜 하나: 접힌 요약(날짜·행 수·합격/불합격·라인별 포인트 범위). 누르면 그 날짜의 행이 한 줄씩 펼쳐진다(읽기만).
+ * 펼친 날짜의 「수정」을 눌러야 행을 눌러 칸을 고치고 리페어 처리·삭제를 할 수 있다.
+ */
+export function DateSummaryCard(props: {
   group: DateGroup;
+  focus: DateFocus;
   cols: { col: string; title: string }[];
-  unlocked: boolean;
   busy: boolean;
   editing: LiveCell | null;
   recordOf: (row: LiveRow) => InspectionRecord | null;
-  onToggle: (date: string) => void;
+  onDate: (date: string) => void;
+  onEditing: () => void;
+  onRow: (row: number) => void;
   onCell: (cell: LiveCell) => void;
   onAction: (action: RowAction, row: LiveRow) => void;
 }) {
-  const { group, cols, unlocked, busy, editing, recordOf, onToggle, onCell, onAction } = props;
+  const { group, focus, cols, busy, editing, recordOf, onDate, onEditing, onRow, onCell, onAction } = props;
+  const open = focus?.date === group.date;
+  const unlocked = open && focus.editing;
   return (
-    <section className={`lc-group${unlocked ? " unlocked" : ""}`}>
-      <div className="lc-group-head">
-        <strong>{group.date || "날짜 없음"}</strong>
-        <span>{group.rows.length}행</span>
-        <button className={`btn small${unlocked ? " primary" : ""}`} type="button" disabled={busy} onClick={() => onToggle(group.date)}>
-          {unlocked ? "완료" : "수정"}
-        </button>
-      </div>
-      {group.rows.map((row) => (
-        <LiveRowCard
-          key={row.row}
-          row={row}
-          cols={cols}
-          unlocked={unlocked}
-          record={unlocked ? recordOf(row) : null}
-          editing={editing && editing.row === row.row ? editing.address : null}
-          onCell={onCell}
-          onAction={onAction}
-        />
-      ))}
+    <section className={`ds${open ? " open" : ""}${unlocked ? " unlocked" : ""}`}>
+      <button type="button" className="ds-head" aria-expanded={open} onClick={() => onDate(group.date)}>
+        <span className="ds-top">
+          <strong>{dotDate(group.date) || "날짜 없음"}</strong>
+          <span>{group.rows.length}행</span>
+          <span className="ds-ok">합격 {group.pass}</span>
+          <span className={`ds-bad${group.fail ? " some" : ""}`}>불합격 {group.fail}</span>
+          <span className="ds-caret" aria-hidden="true">{open ? "▴" : "▾"}</span>
+        </span>
+        <span className="ds-lines">{group.lines.map((l) => `${l.short} · ${l.ranges}`).join("  /  ")}</span>
+      </button>
+      {open && (
+        <div className="ds-body">
+          <div className="ds-bar">
+            <span>{unlocked ? "행을 눌러 고치기" : "읽기 전용"}</span>
+            <button className={`btn small${unlocked ? " primary" : ""}`} type="button" disabled={busy} onClick={onEditing}>
+              {unlocked ? "완료" : "수정"}
+            </button>
+          </div>
+          <div className="ds-rows">
+            {group.rows.map((row) => {
+              const rowOpen = unlocked && focus.row === row.row;
+              return (
+                <div key={row.row} className={`dr${verdictOf(row) === "bad" ? " fail" : ""}${rowOpen ? " on" : ""}`}>
+                  {unlocked ? (
+                    <button type="button" className="dr-row" aria-expanded={rowOpen} onClick={() => onRow(row.row)}>
+                      <RowLine row={row} />
+                    </button>
+                  ) : (
+                    <div className="dr-row">
+                      <RowLine row={row} />
+                    </div>
+                  )}
+                  {rowOpen && (
+                    <RowEditor
+                      row={row}
+                      cols={cols}
+                      record={recordOf(row)}
+                      editing={editing && editing.row === row.row ? editing.address : null}
+                      onCell={onCell}
+                      onAction={onAction}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -247,8 +275,8 @@ export function ListScreen() {
   const [filters, setFilters] = useState<ListFilters>({});
   const [filterCol, setFilterCol] = useState<string | null>(null);
   const [mode, setMode] = useState<ColumnMode>(readMode);
-  const [limit, setLimit] = useState(CARD_PAGE);
-  const [unlockedDate, setUnlockedDate] = useState<string | null>(null);
+  const [limit, setLimit] = useState(DATE_PAGE);
+  const [focus, setFocus] = useState<DateFocus>(null);
   function chooseMode(next: ColumnMode): void {
     setMode(next);
     try { localStorage.setItem(MODE_KEY, next); } catch { /* 저장 불가 */ }
@@ -293,8 +321,8 @@ export function ListScreen() {
     const siteChanged = lastSite.current !== site;
     lastSite.current = site;
     if (siteChanged) {
-      setUnlockedDate(null);
-      setLimit(CARD_PAGE);
+      setFocus(null);
+      setLimit(DATE_PAGE);
       setFilters({});
       setFilterCol(null);
     }
@@ -331,10 +359,10 @@ export function ListScreen() {
     [],
   );
 
-  function toggleGroup(date: string): void {
+  function refocus(next: (focus: DateFocus) => DateFocus): void {
     setEdit(null);
     setNote("");
-    setUnlockedDate((current) => (current === date ? null : date));
+    setFocus(next);
   }
 
   async function act(action: RowAction, row: LiveRow): Promise<void> {
@@ -401,10 +429,9 @@ export function ListScreen() {
 
   const table = view.status === "ok" ? view.table : null;
   const shownRows = useMemo(() => (table ? applyFilters(table.rows, filters) : []), [table, filters]);
-  // 필터가 바뀌면 카드는 처음부터(앞 200장).
-  useEffect(() => setLimit(CARD_PAGE), [filters]);
+  useEffect(() => setLimit(DATE_PAGE), [filters]);
   const cols = useMemo(() => (table ? visibleColumns(table.header, mode) : []), [table, mode]);
-  const groups = useMemo(() => groupByDate(pageRows(shownRows, limit)), [shownRows, limit]);
+  const groups = useMemo(() => summarizeByDate(shownRows), [shownRows]);
   const recordOf = (row: LiveRow) => (table ? matchRecord(session.records, table, row) : null);
   const actRef = useRef(act);
   actRef.current = act;
@@ -422,7 +449,7 @@ export function ListScreen() {
         </select>
         {target && (
           <p className="nav-hint">
-            {LIST_BOOK_LABEL[target.book]} · 시트 「{target.sheetName}」 · OneDrive 에서 바로 읽음. 검사 날짜 묶음의 「수정」을 눌러야 고칠 수 있고, 고친 칸만 엑셀에 씁니다(시트·행은 만들지 않음).
+            {LIST_BOOK_LABEL[target.book]} · 시트 「{target.sheetName}」 · OneDrive 에서 바로 읽음. 날짜를 눌러 펼치고 「수정」을 눌러야 고칠 수 있고, 고친 칸만 엑셀에 씁니다(시트·행은 만들지 않음).
           </p>
         )}
         <button className="btn block" type="button" disabled={view.status === "loading" || busy || (view.status === "ok" && view.refreshing)} onClick={() => void load(view.status === "ok")}>
@@ -517,24 +544,26 @@ export function ListScreen() {
             ) : (
               <>
                 <div className="lc-list">
-                  {groups.map((group) => (
-                    <DateGroupCard
+                  {groups.slice(0, limit).map((group) => (
+                    <DateSummaryCard
                       key={group.date}
                       group={group}
+                      focus={focus}
                       cols={cols}
-                      unlocked={unlockedDate === group.date}
                       busy={busy}
                       editing={edit?.cell ?? null}
                       recordOf={recordOf}
-                      onToggle={toggleGroup}
+                      onDate={(date) => refocus((f) => toggleDate(f, date))}
+                      onEditing={() => refocus(toggleEditing)}
+                      onRow={(row) => refocus((f) => toggleRow(f, row))}
                       onCell={onCell}
                       onAction={onAction}
                     />
                   ))}
                 </div>
-                {shownRows.length > limit && (
-                  <button type="button" className="btn block lc-more" onClick={() => setLimit(limit + CARD_PAGE)}>
-                    더 보기 ({(shownRows.length - limit).toLocaleString("ko-KR")}행 남음)
+                {groups.length > limit && (
+                  <button type="button" className="btn block lc-more" onClick={() => setLimit(limit + DATE_PAGE)}>
+                    더 보기 ({(groups.length - limit).toLocaleString("ko-KR")}일 남음)
                   </button>
                 )}
                 <div className="lc-end" />

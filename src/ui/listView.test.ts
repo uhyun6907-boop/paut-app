@@ -20,18 +20,18 @@ vi.stubGlobal("localStorage", {
 
 import { GraphClient, graphRetry } from "../sync/graph";
 import type { FakeDrive } from "../test/fakeGraph";
-import { LIST_ID, graphConfig, realDrive, realListRecords } from "../test/realBooks";
+import { LIST_ID, graphConfig, realDrive, realGmRecords, realListRecords } from "../test/realBooks";
 import { cellText, lastDataRow, LIVE_CHUNK_ROWS, LIVE_PARALLEL, loadLiveList, writeLiveCell, type LiveTable } from "../excel/liveList";
 import { readSheet } from "../excel/ooxml";
 import { packTable, unpackTable } from "../store/listCache";
 import { CACHE_STALE_TEXT, loadListCache, mergeTables, openList, type CacheSlot, type ListView } from "./listLoad";
 import { BLANK, activeColumns, applyFilters, clearColumn, columnValues, countText, filterableColumns, setText, toggleValue, type ListFilters } from "./listFilter";
 import { getState, liveListClient, settled } from "../store/session";
-import { CARD_PAGE, KEY_COLS, MODE_LABEL, groupByDate, pageRows, visibleColumns, type DateGroup } from "./listLayout";
+import { KEY_COLS, MODE_LABEL, shortLine, summarizeByDate, toggleDate, toggleEditing, toggleRow, visibleColumns, type DateFocus, type DateGroup } from "./listLayout";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { matchRecord } from "../excel/liveList";
-import { DateGroupCard, applyRowAction, deleteConfirmText } from "./ListScreen";
+import { DateSummaryCard, applyRowAction, deleteConfirmText } from "./ListScreen";
 
 const SITE = "드림 합정주공";
 let drive: FakeDrive;
@@ -285,23 +285,9 @@ describe("리스트 휴대폰 카드 보기 · 주요 열 / 모든 열", () => {
     expect(MODE_LABEL).toEqual({ key: "주요 열", all: "모든 열" });
   });
 
-  it("카드 목록은 거른 행의 순번 순서 그대로, 앞에서부터 한 장씩(가로 표 없음)", async () => {
-    const table = await fresh();
-    const page = pageRows(table.rows, CARD_PAGE);
-    expect(page).toEqual(table.rows.slice(0, CARD_PAGE));
-    const seqs = table.rows.map((r) => r.cells[0].value).filter((v) => typeof v === "number") as number[];
-    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
-    const pv = columnValues(table.rows, "P");
-    const filtered = applyFilters(table.rows, { P: { values: [pv[0].value], text: "" } });
-    const idx = filtered.map((r) => table.rows.indexOf(r));
-    expect(idx).toEqual([...idx].sort((a, b) => a - b)); // 필터 뒤에도 순서 그대로
-    expect(pageRows(filtered, 5)).toEqual(filtered.slice(0, 5));
-    expect(pageRows(filtered, filtered.length + 10)).toBe(filtered);
-  });
-
   it("카드에서 주요 열(판정·포인트)을 고쳐도 그 칸 하나만 PATCH, 행 추가·'앱' 없음", async () => {
     const table = await fresh();
-    const row = pageRows(table.rows, CARD_PAGE)[3];
+    const row = table.rows[3];
     const cols = visibleColumns(table.header, "key").map((c) => c.col);
     const cell = row.cells.find((c) => c.col === "S" && cols.includes(c.col))!;
     drive.log.length = 0;
@@ -317,58 +303,122 @@ describe("리스트 휴대폰 카드 보기 · 주요 열 / 모든 열", () => {
   });
 });
 
-describe("리스트 검사 날짜 묶음 · 「수정」 전에는 읽기만", () => {
-  function render(group: DateGroup, unlocked: boolean, cols: { col: string; title: string }[]): string {
+describe("리스트 검사 날짜 요약 · 누르면 펼침, 「수정」 전에는 읽기만", () => {
+  const SITE_PA = "지성 마전 PA";
+  async function maJeon(): Promise<LiveTable> {
+    const res = await loadLiveList(client(), graphConfig(), SITE_PA, [...realListRecords(), ...realGmRecords()]);
+    if (!res.ok) throw new Error(res.message);
+    return res.table;
+  }
+  function render(group: DateGroup, focus: DateFocus, cols: { col: string; title: string }[], table: LiveTable): string {
     return renderToStaticMarkup(
-      createElement(DateGroupCard, {
+      createElement(DateSummaryCard, {
         group,
+        focus,
         cols,
-        unlocked,
         busy: false,
         editing: null,
-        recordOf: (row) => matchRecord(getState().records, { book: "list", sheetName: SITE }, row),
-        onToggle: () => undefined,
+        recordOf: (row) => matchRecord(getState().records, table, row),
+        onDate: () => undefined,
+        onEditing: () => undefined,
+        onRow: () => undefined,
         onCell: () => undefined,
         onAction: () => undefined,
       }),
     );
   }
+  const cellButtons = (html: string) => [...html.matchAll(/<button[^>]*class="lc-f[^"]*"[^>]*>/g)].map((m) => m[0]);
 
-  it("행을 검사 날짜(E)별로 묶는다. 날짜 없는 행은 따로, 묶음 안 순서는 순번 그대로", async () => {
-    const table = await fresh();
-    const groups = groupByDate(table.rows);
+  it("날짜마다 요약 하나: 행 수·합격/불합격 수·라인별 포인트 범위. 최근 날짜가 먼저, 날짜 없는 행은 맨 뒤", async () => {
+    const table = await maJeon();
+    const groups = summarizeByDate(table.rows);
     expect(groups.flatMap((g) => g.rows).length).toBe(table.rows.length);
+    const dates = groups.map((g) => g.date);
+    expect(dates).toEqual([...dates].sort().reverse());
     for (const g of groups) {
       expect(g.rows.every((r) => cellText(r.cells.find((c) => c.col === "E")!).trim() === g.date)).toBe(true);
       const at = g.rows.map((r) => table.rows.indexOf(r));
       expect(at).toEqual([...at].sort((a, b) => a - b));
+      expect(g.pass + g.fail).toBeLessThanOrEqual(g.rows.length);
     }
-    expect(new Set(groups.map((g) => g.date)).size).toBe(groups.length);
+    const day = groups.find((g) => g.date === "2026-06-18")!;
+    expect(day.rows).toHaveLength(44);
+    expect(day.pass + day.fail).toBe(44);
+    expect(day.lines.find((l) => l.line === "MJDH-D-D-P-58-003-200A")).toEqual({ line: "MJDH-D-D-P-58-003-200A", short: "003", ranges: "S25~S40, R25~R40" });
+    expect(day.lines.find((l) => l.short === "006")!.ranges).toBe("S11~S16, R11~R16");
+
     const undated = { ...table.rows[0], row: 99999, cells: table.rows[0].cells.map((c) => (c.col === "E" ? { ...c, value: "" } : c)) };
-    expect(groupByDate([...table.rows, undated]).at(-1)).toEqual({ date: "", rows: [undated] });
+    const withUndated = summarizeByDate([undated, ...table.rows]);
+    expect(withUndated.at(-1)!.date).toBe("");
+    expect(withUndated.at(-1)!.rows).toEqual([undated]);
+    expect(withUndated[0].date).toBe(dates[0]);
+
+    expect(shortLine("HY-S-035-1-200A-IN")).toBe("035-1");
+    expect(shortLine("GP-001-750A")).toBe("001");
+    expect(shortLine("군포산본 이원화 750A-5")).toBe("군포산본 이원화 750A-5");
   });
 
-  it("「수정」 전에는 모든 칸이 눌리지 않고 리페어 처리·삭제도 없다. 「수정」 뒤에는 고칠 수 있는 칸만 눌리고 행마다 두 버튼", async () => {
-    const table = await fresh();
-    getState().records.splice(0, getState().records.length, ...realListRecords());
-    const group = groupByDate(table.rows).find((g) => g.date && g.rows.some((r) => matchRecord(getState().records, table, r)))!;
+  it("같은 번호로 줄어드는 라인이 둘이면 라인 전체를 보인다", async () => {
+    const table = await maJeon();
+    const row = table.rows[0];
+    const other = { ...row, row: 99998, cells: row.cells.map((c) => (c.col === "F" ? { ...c, value: "XX-" + cellText(c) } : c)) };
+    const lines = summarizeByDate([row, other])[0].lines;
+    expect(lines.map((l) => l.short)).toEqual(lines.map((l) => l.line));
+  });
+
+  it("한 번에 한 날짜만 펼친다. 다른 날짜를 누르면 앞 날짜는 접히고 「수정」도 풀린다, 같은 날짜를 다시 누르면 접힘", () => {
+    let focus: DateFocus = null;
+    focus = toggleDate(focus, "2026-06-18");
+    expect(focus).toEqual({ date: "2026-06-18", editing: false, row: null });
+    expect(toggleRow(focus, 140)).toBe(focus);
+    focus = toggleRow(toggleEditing(focus), 140);
+    expect(focus).toEqual({ date: "2026-06-18", editing: true, row: 140 });
+    expect(toggleRow(focus, 140)).toEqual({ date: "2026-06-18", editing: true, row: null });
+    expect(toggleEditing(focus)).toEqual({ date: "2026-06-18", editing: false, row: null });
+    focus = toggleDate(focus, "2026-06-10");
+    expect(focus).toEqual({ date: "2026-06-10", editing: false, row: null });
+    expect(toggleDate(focus, "2026-06-10")).toBeNull();
+    expect(toggleEditing(null)).toBeNull();
+  });
+
+  it("접힌 요약은 행을 그리지 않고, 펼치면 행이 한 줄씩(칸 버튼·삭제 없음). 「수정」 뒤 연 행만 칸과 리페어 처리·삭제", async () => {
+    getState().records.splice(0, getState().records.length, ...realListRecords(), ...realGmRecords());
+    const table = await maJeon();
+    const group = summarizeByDate(table.rows).find((g) => g.date === "2026-06-18")!;
     const cols = visibleColumns(table.header, "all");
-    const cellButtons = (html: string) => [...html.matchAll(/<button[^>]*class="lc-f[^"]*"[^>]*>/g)].map((m) => m[0]);
 
-    const locked = render(group, false, cols);
-    expect(locked).toContain(`${group.rows.length}행`);
-    expect(locked).toContain(">수정</button>");
-    expect(cellButtons(locked).length).toBeGreaterThan(group.rows.length * 4);
-    expect(cellButtons(locked).every((b) => b.includes("disabled"))).toBe(true);
-    expect(locked).not.toContain("삭제");
-    expect(locked).not.toContain("리페어 처리");
+    const closed = render(group, null, cols, table);
+    expect(closed).toContain("26.06.18");
+    expect(closed).toContain("44행");
+    expect(closed).toContain(`합격 ${group.pass}`);
+    expect(closed).toContain("003 · S25~S40, R25~R40");
+    expect(closed).toContain('aria-expanded="false"');
+    expect(closed).not.toContain("dr-row");
+    expect(closed).not.toContain(">수정</button>");
 
-    const open = render(group, true, cols);
-    expect(open).toContain(">완료</button>");
-    const enabled = cellButtons(open).filter((b) => !b.includes("disabled"));
-    expect(enabled.some((b) => b.includes(`aria-label="${cols.find((c) => c.col === "P")!.title} P`))).toBe(true);
+    const open = render(group, { date: group.date, editing: false, row: null }, cols, table);
+    expect(open.match(/class="dr-row"/g)).toHaveLength(44);
+    expect(open).not.toMatch(/<button[^>]*class="dr-row"/);
+    expect(open).toContain(">수정</button>");
+    expect(cellButtons(open)).toEqual([]);
+    expect(open).not.toContain("삭제");
+    expect(open).not.toContain("리페어 처리");
+
+    const target = group.rows.find((r) => matchRecord(getState().records, table, r))!;
+    const editing = render(group, { date: group.date, editing: true, row: null }, cols, table);
+    expect(editing).toContain(">완료</button>");
+    expect(editing.match(/<button[^>]*class="dr-row"/g)).toHaveLength(44);
+    expect(cellButtons(editing)).toEqual([]);
+
+    const rowOpen = render(group, { date: group.date, editing: true, row: target.row }, cols, table);
+    const enabled = cellButtons(rowOpen).filter((b) => !b.includes("disabled"));
+    expect(enabled.some((b) => b.includes(`aria-label="${cols.find((c) => c.col === "P")!.title} P${target.row}"`))).toBe(true);
     expect(enabled.some((b) => / Y\d+"/.test(b))).toBe(false);
-    expect(open.match(/>삭제<\/button>/g)?.length).toBe(group.rows.filter((r) => matchRecord(getState().records, table, r)).length);
+    expect(rowOpen.match(/>삭제<\/button>/g)).toHaveLength(1);
+    expect(rowOpen.match(/>리페어 처리<\/button>/g)).toHaveLength(1);
+
+    const otherDay = summarizeByDate(table.rows).find((g) => g.date === "2026-06-10")!;
+    expect(render(otherDay, { date: group.date, editing: true, row: target.row }, cols, table)).not.toContain("dr-row");
   });
 
   it("「삭제」는 확인을 받아야만 지운다. 취소하면 앱 기록·엑셀 대기 모두 그대로", async () => {
