@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useDrill } from "./drill";
 import { ILJI_COLUMNS, LIST_GM_FILE, type AppConfig, type SiteMapping } from "../domain/types";
-import { listXlsxFiles, searchDrive, type DriveItem } from "../sync/graph";
+import { listChildren, searchDrive, type DriveItem } from "../sync/graph";
 import { accessToken, redirectUri, resolveClientId } from "../sync/msal";
 import { resetSamples, saveConfig, signIn, signOut, useOneDriveFile, useSession } from "../store/session";
 import type { BookKind } from "../excel/engine";
@@ -46,17 +46,87 @@ export function SettingsScreen() {
     });
   }
 
+  /** 지금 보고 있는 폴더 경로(빈 배열이면 첫 화면: 드라이브 루트 + 찾은 엑셀). */
+  const [folderPath, setFolderPath] = useState<DriveItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  /** 늦게 온 응답이 새 화면을 덮지 않게. */
+  const loadNo = useRef(0);
+
+  function isXlsx(item: DriveItem): boolean {
+    return !item.folder && item.name.toLowerCase().endsWith(".xlsx");
+  }
+
+  /** 폴더 먼저, 그다음 엑셀(이름순). 같은 항목은 한 번만. */
+  function arrange(list: DriveItem[]): DriveItem[] {
+    const map = new Map<string, DriveItem>();
+    for (const item of list) if (item.folder || isXlsx(item)) map.set(item.id, item);
+    return [...map.values()].sort((a, b) => (a.folder ? 0 : 1) - (b.folder ? 0 : 1) || a.name.localeCompare(b.name, "ko"));
+  }
+
+  async function token(): Promise<string> {
+    return accessToken(resolveClientId(draft.clientId));
+  }
+
+  /** 폴더 하나를 연다. 첫 화면(path 빈 배열)이면 루트를 먼저 보이고, 루트 바로 아래 폴더의 엑셀과 검색 결과를 오는 대로 더한다. */
+  async function openFolder(path: DriveItem[]) {
+    const no = ++loadNo.current;
+    setFolderPath(path);
+    setPickError("");
+    setItems([]);
+    setLoading(true);
+    try {
+      const t = await token();
+      const here = path.length ? path[path.length - 1].id : "root";
+      const first = await listChildren(t, here);
+      if (no !== loadNo.current) return;
+      let shown = arrange(first);
+      setItems(shown);
+      if (path.length) return;
+      const more = [
+        ...first.filter((item) => item.folder).slice(0, 40).map((folder) => listChildren(t, folder.id)),
+        ...["거래명세", "작업일지", "비파괴", "xlsx"].map((q) => searchDrive(t, q)),
+      ];
+      await Promise.all(
+        more.map((p) =>
+          p
+            .then((found) => {
+              if (no !== loadNo.current) return;
+              shown = arrange([...shown, ...found.filter(isXlsx)]);
+              setItems(shown);
+            })
+            .catch(() => undefined),
+        ),
+      );
+    } catch (error) {
+      if (no === loadNo.current) setPickError(error instanceof Error ? error.message : "엑셀 목록을 열지 못했습니다. 먼저 Microsoft 로그인을 하세요.");
+    } finally {
+      if (no === loadNo.current) setLoading(false);
+    }
+  }
+
+  async function searchPicker() {
+    const q = query.trim();
+    if (!q) return openFolder([]);
+    const no = ++loadNo.current;
+    const known = items.filter((item) => isXlsx(item) && item.name.normalize("NFC").toLowerCase().includes(q.normalize("NFC").toLowerCase()));
+    setFolderPath([]);
+    setPickError("");
+    setItems(arrange(known));
+    setLoading(true);
+    try {
+      const found = await searchDrive(await token(), q);
+      if (no === loadNo.current) setItems(arrange([...known, ...found.filter(isXlsx)]));
+    } catch (error) {
+      if (no === loadNo.current && !known.length) setPickError(error instanceof Error ? error.message : "검색 실패");
+    } finally {
+      if (no === loadNo.current) setLoading(false);
+    }
+  }
+
   async function openPicker(kind: BookKind) {
     setPicker(kind);
-    setPickError("");
     setQuery("");
-    setItems([]);
-    try {
-      const token = await accessToken(resolveClientId(draft.clientId));
-      setItems(await listXlsxFiles(token));
-    } catch (error) {
-      setPickError(error instanceof Error ? error.message : "엑셀 목록을 열지 못했습니다. 먼저 Microsoft 로그인을 하세요.");
-    }
+    await openFolder([]);
   }
 
   async function choose(item: DriveItem) {
@@ -199,41 +269,29 @@ export function SettingsScreen() {
           <p className="nav-hint">OneDrive의 .xlsx를 누르면 이 칸에 기억됩니다.</p>
           <div className="row">
             <input className="field-input" value={query} placeholder="이름 검색" onChange={(e) => setQuery(e.target.value)} />
-            <button
-              className="btn"
-              type="button"
-              onClick={() => {
-                void (async () => {
-                  try {
-                    const token = await accessToken(resolveClientId(draft.clientId));
-                    const q = query.trim();
-                    const all = await listXlsxFiles(token);
-                    // 폴더를 훑은 목록에서 이름으로 거르고, OneDrive 검색 결과를 더한다(검색 색인에 없는 파일도 보이게).
-                    const found = q
-                      ? [
-                          ...all.filter((item) => item.name.normalize("NFC").toLowerCase().includes(q.normalize("NFC").toLowerCase())),
-                          ...(await searchDrive(token, q).catch(() => [] as DriveItem[])),
-                        ]
-                      : all;
-                    const seen = new Set<string>();
-                    setItems(found.filter((item) => !item.folder && item.name.toLowerCase().endsWith(".xlsx") && !seen.has(item.id) && !!seen.add(item.id)));
-                    setPickError("");
-                  } catch (error) {
-                    setPickError(error instanceof Error ? error.message : "검색 실패");
-                  }
-                })();
-              }}
-            >
+            <button className="btn" type="button" onClick={() => void searchPicker()}>
               검색
             </button>
           </div>
-          {pickError && <div className="err">{pickError}</div>}
-          {items.length === 0 && !pickError && <div className="empty-note">xlsx가 없습니다. 검색어를 바꿔 보세요.</div>}
-          {items.map((item) => (
-            <button key={item.id} className="choice" type="button" onClick={() => void choose(item)}>
-              {item.name}
+          {folderPath.length > 0 && (
+            <button className="choice" type="button" onClick={() => void openFolder(folderPath.slice(0, -1))}>
+              ← 위로 <span className="nav-hint">({folderPath.map((f) => f.name).join(" / ")})</span>
             </button>
-          ))}
+          )}
+          {pickError && <div className="err">{pickError}</div>}
+          {loading && <div className="empty-note">OneDrive 목록을 불러오는 중…</div>}
+          {!loading && items.length === 0 && !pickError && <div className="empty-note">xlsx가 없습니다. 폴더를 열거나 검색어를 바꿔 보세요.</div>}
+          {items.map((item) =>
+            item.folder ? (
+              <button key={item.id} className="choice" type="button" onClick={() => void openFolder([...folderPath, item])}>
+                📁 {item.name}
+              </button>
+            ) : (
+              <button key={item.id} className="choice" type="button" onClick={() => void choose(item)}>
+                {item.name}
+              </button>
+            ),
+          )}
           <button className="btn block" type="button" onClick={() => setPicker(null)}>닫기</button>
         </div>
       </div>

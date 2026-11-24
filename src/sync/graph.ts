@@ -100,8 +100,11 @@ function childrenUrl(parent: string): string {
   return `${base}/children?$top=200&$select=id,name,folder,file,size,lastModifiedDateTime`;
 }
 
-export async function listChildren(token: string, parentId: string | "root"): Promise<DriveItem[]> {
-  const res = await graphFetch(childrenUrl(parentId), token);
+/** 파일 고르기 화면의 요청 하나 시간 제한(ms). 한 폴더가 멈춰도 목록 전체가 오래 비어 있지 않게. */
+export const PICKER_TIMEOUT_MS = 20_000;
+
+export async function listChildren(token: string, parentId: string | "root", timeoutMs = PICKER_TIMEOUT_MS): Promise<DriveItem[]> {
+  const res = await graphFetch(childrenUrl(parentId), token, {}, undefined, timeoutMs);
   if (!res.ok) throw new Error(await readError(res));
   const json = (await res.json()) as { value: DriveItem[] };
   return json.value || [];
@@ -141,10 +144,10 @@ export function searchQueriesFor(name: string): string[] {
   return [...new Set([name, stem, ...words])].slice(0, 6);
 }
 
-export async function searchDrive(token: string, query: string): Promise<DriveItem[]> {
+export async function searchDrive(token: string, query: string, timeoutMs = PICKER_TIMEOUT_MS): Promise<DriveItem[]> {
   const q = query.replace(/'/g, "''");
   const url = `${GRAPH}/me/drive/root/search(q='${encodeURIComponent(q)}')?$top=40&$select=id,name,folder,file,size`;
-  const res = await graphFetch(url, token);
+  const res = await graphFetch(url, token, {}, undefined, timeoutMs);
   if (!res.ok) throw new Error(await readError(res));
   const json = (await res.json()) as { value: DriveItem[] };
   return json.value || [];
