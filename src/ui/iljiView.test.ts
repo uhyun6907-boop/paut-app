@@ -20,8 +20,9 @@ import { ILJI_ID, graphConfig, meta, realDrive } from "../test/realBooks";
 import { iljiText, loadIlji, planIljiEdit, type IljiCell, type IljiTable } from "../excel/liveIlji";
 import { readSheet, setCell, setXml } from "../excel/ooxml";
 import { getState, settled } from "../store/session";
-import { IljiGrid, defaultMonth, saveIljiEdit, type IljiEdit } from "./IljiScreen";
-import { JournalTab } from "./App";
+import { IljiGrid, IljiScreen, defaultMonth, saveIljiEdit, type IljiEdit } from "./IljiScreen";
+import { TabBar } from "./App";
+import { RefScreen } from "./RefScreen";
 
 let drive: FakeDrive;
 const client = () => new GraphClient({ getToken: async () => drive.validToken, fetchImpl: drive.fetch, sleep: async () => undefined });
@@ -197,15 +198,31 @@ describe("일지 탭 · 「수정」", () => {
   });
 });
 
-describe("일지 탭 · 참고", () => {
-  it("같은 탭의 「참고」에서 관경·스캔 참고를 그대로 본다", () => {
-    const ref = renderToStaticMarkup(createElement(JournalTab, { part: "ref", onPart: () => undefined }));
-    expect(ref).toContain('<button class="" type="button">근무일지</button><button class="on" type="button">참고</button>');
+describe("5번 탭 · 참고", () => {
+  it("참고(관경·스캔·스케줄표)는 5번째 탭이고 일지 탭에는 없다", () => {
+    const bar = renderToStaticMarkup(createElement(TabBar, { tab: "ref", onTab: () => undefined }));
+    expect([...bar.matchAll(/<button/g)]).toHaveLength(5);
+    expect(bar).toMatch(/<button[^>]*class="on"[^>]*><span>⌗<\/span>참고<\/button><\/nav>$/);
+    const ref = renderToStaticMarkup(createElement(RefScreen));
     expect(ref).toContain("외경/스캔");
     expect(ref).toContain("이중보온관");
-    const ilji = renderToStaticMarkup(createElement(JournalTab, { part: "ilji", onPart: () => undefined }));
-    expect(ilji).toContain('<button class="on" type="button">근무일지</button>');
+    const ilji = renderToStaticMarkup(createElement(IljiScreen));
     expect(ilji).toContain("OneDrive 에서 작업일지를 읽는 중…");
     expect(ilji).not.toContain("외경/스캔");
+    expect(ilji).not.toContain(">참고</button>");
+  });
+});
+
+describe("입력 탭 날짜별 기록 · 일지·리스트 탭 수정 연동", () => {
+  it("일지 탭·리스트 탭에서 맞춘 그날 검사자·시간(dayStaff)이 기기의 작업일지 사본보다 먼저 보인다", async () => {
+    const { mergeDayStaff } = await import("./DayHistory");
+    const copy = { "2026-11-24": { dayType: "평일", workers: ["조우현", "심명보"], timeStart: "09:00", timeEnd: "18:00" } };
+    const merged = mergeDayStaff(copy, {
+      "2026-11-24": { dayType: "평일", insp1: "조우현", insp2: "", timeStart: "14:00", timeEnd: "18:30" },
+      "2026-11-25": { dayType: "평일", insp1: "김정환", insp2: "", timeStart: "08:00", timeEnd: "12:00" },
+    });
+    expect(merged["2026-11-24"]).toEqual({ dayType: "평일", workers: ["조우현"], timeStart: "14:00", timeEnd: "18:30" });
+    expect(merged["2026-11-25"].workers).toEqual(["김정환"]);
+    expect(copy["2026-11-24"].workers).toEqual(["조우현", "심명보"]);
   });
 });

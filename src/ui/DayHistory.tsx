@@ -1,12 +1,30 @@
 /**
  * 1번 탭: 카드·'검사 기록' 아래에 더하는 '날짜별 기록'. 날짜를 누르면 그날 검사 내역(도면·개수·판정)과
  * 작업일지의 근무자·근무시간을 보여 준다. 읽기만 한다(엑셀·기록에 쓰지 않음).
+ * 일지 탭·리스트 탭에서 고친 값이 바로 보이게: 기록은 앱 기록 그대로, 근무자·시간은 앱이 그날 값으로 기억한 것(dayStaff —
+ * 일지 탭 칸 수정·리스트 탭 「수정」이 맞춰 둠)을 기기의 작업일지 사본보다 먼저 쓴다.
  * <details> 를 써서 화면 위에 띄우지 않으므로 두 손가락 확대 상태에서도 그대로 펼치고 읽을 수 있다.
  */
 import { useMemo, useState } from "react";
-import { dayHistory, NO_WORKLOG_TEXT, workersText, workTimeText } from "../domain/dayHistory";
-import type { InspectionRecord } from "../domain/types";
+import { dayHistory, NO_WORKLOG_TEXT, workersText, workTimeText, type WorkLogInfo } from "../domain/dayHistory";
+import type { DayStaff, InspectionRecord } from "../domain/types";
 import { workLogByDate } from "../excel/engine";
+import { useSession } from "../store/session";
+
+/** 기기의 작업일지 사본에 앱이 기억한 그날 검사자·시간(dayStaff)을 덮어쓴다. 입력은 바꾸지 않는다. */
+export function mergeDayStaff(log: Record<string, WorkLogInfo>, dayStaff: Record<string, DayStaff> | undefined): Record<string, WorkLogInfo> {
+  if (!dayStaff) return log;
+  const out: Record<string, WorkLogInfo> = { ...log };
+  for (const [date, st] of Object.entries(dayStaff)) {
+    out[date] = {
+      dayType: st.dayType || log[date]?.dayType || "",
+      workers: [st.insp1, st.insp2].filter(Boolean),
+      timeStart: st.timeStart,
+      timeEnd: st.timeEnd,
+    };
+  }
+  return out;
+}
 
 const PAGE = 30;
 
@@ -18,7 +36,9 @@ function dayLabel(iso: string): string {
 }
 
 export function DayHistory({ records, site }: { records: InspectionRecord[]; site: string }) {
-  const workLog = workLogByDate();
+  const dayStaff = useSession().meta.dayStaff;
+  const copy = workLogByDate();
+  const workLog = useMemo(() => mergeDayStaff(copy, dayStaff), [copy, dayStaff]);
   const days = useMemo(() => dayHistory(records, workLog), [records, workLog]);
   const [limit, setLimit] = useState(PAGE);
   return (

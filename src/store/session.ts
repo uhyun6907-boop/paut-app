@@ -82,12 +82,15 @@ const emptyConfig = (): AppConfig => ({
   inspectors: ["조우현", "심명보"],
 });
 
+/** 새 작업 날짜의 기본 검사자: 조우현 한 명(검사자 2는 비움). 그날 저장해 둔 값이 있으면 그 값. */
+export const DEFAULT_INSPECTOR = "조우현";
+
 function emptyMeta(): DayMeta {
   return {
     workDate: todayISO(),
     dayType: "평일",
-    insp1: "조우현",
-    insp2: "심명보",
+    insp1: DEFAULT_INSPECTOR,
+    insp2: "",
     timeStart: "09:00",
     timeEnd: "18:00",
     lastSite: "",
@@ -1778,7 +1781,19 @@ export async function updateMeta(partial: Partial<DayMeta>): Promise<void> {
   const next = { ...state.meta, ...partial, insp2ByDate: byDate };
   if (partial.workDate && partial.workDate !== state.meta.workDate) {
     byDate[state.meta.workDate] = state.meta.insp2;
-    if (byDate[partial.workDate] !== undefined) next.insp2 = byDate[partial.workDate];
+    const saved = state.meta.dayStaff?.[partial.workDate];
+    if (partial.insp1 === undefined && partial.insp2 === undefined) {
+      if (saved) {
+        next.insp1 = saved.insp1;
+        next.insp2 = saved.insp2;
+      } else if (byDate[partial.workDate] !== undefined) {
+        next.insp2 = byDate[partial.workDate];
+      } else {
+        // 처음 쓰는 날짜: 검사자는 조우현 한 명이 기본.
+        next.insp1 = DEFAULT_INSPECTOR;
+        next.insp2 = "";
+      }
+    }
   }
   if (partial.insp2 !== undefined) byDate[next.workDate] = partial.insp2;
   state.meta = next;

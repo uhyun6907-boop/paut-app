@@ -80,11 +80,11 @@ describe("작업 날짜가 오늘로 넘어간다", () => {
     expect((mem.get("meta") as DayMeta).workDate).toBe(TODAY);
   });
 
-  it("그날 값이 없으면 검사자·시간은 그대로, 구분은 오늘 요일로(토요일 → 공휴일)", async () => {
-    seed([rec("S01")], { dayType: "평일" });
+  it("그날 값이 없으면 검사자는 조우현 한 명(검사자 2 비움), 시간은 그대로, 구분은 오늘 요일로(토요일 → 공휴일)", async () => {
+    seed([rec("S01")], { dayType: "평일", insp1: "김정환", insp2: "심명보" });
     onDay("2026-11-21");
     const s = await boot();
-    expect(s.getState().meta).toMatchObject({ workDate: "2026-11-21", dayType: "공휴일", insp1: "조우현", insp2: "심명보", timeStart: "09:00" });
+    expect(s.getState().meta).toMatchObject({ workDate: "2026-11-21", dayType: "공휴일", insp1: "조우현", insp2: "", timeStart: "09:00" });
   });
 
   it("지난 날짜에 저장 안 한 기록이 있으면 바꾸지 않고 묻는다. 「오늘로 바꾸기」는 그 미저장 기록만 오늘로 옮긴다", async () => {
