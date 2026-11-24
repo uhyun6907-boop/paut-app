@@ -1,23 +1,24 @@
 import { buildBill, iljiDiameterLabel, passingRecords } from "../domain/billing";
 import { isoToExcelSerial, parseFlexibleDate } from "../domain/dates";
 import type { AppConfig, DayMeta, DayStaff, DriveFile, FileSteps, InspectionRecord, ListBookKind, SyncFile, SyncReport, SyncStatus } from "../domain/types";
-import { FAIL, LIST_BOOKS, LIST_BOOK_LABEL, LIST_GM_FILE, PASS, SYNC_FILE_LABEL } from "../domain/types";
-import { findMonthSheet, isRemovedSite, mappingFor, REMOVED_SITE_MAPPINGS } from "../domain/mapping";
+import { FAIL, LIST_BOOKS, LIST_BOOK_LABEL, LIST_GM_FILE, STATEMENT_AJ_FILE, PASS, SYNC_FILE_LABEL } from "../domain/types";
+import { findMonthSheet, isRemovedSite, mappingFor, matchStatementSheet, REMOVED_SITE_MAPPINGS, sheetSortKey, type StatementSheetRef } from "../domain/mapping";
 import { readDayStaff, readInspectors, readWorkLog, applyIljiDay, findIljiSheet, readIljiDay, type IljiGroup, type WorkLogDay } from "./iljiBook";
 import { appIdRows, LIST_LAYOUT, listBookOf, listDiameterValue, listSheetOf, orderForAppend, parseListWorkbook, planLineReorder, styleAppendedRow, writeListRow, type ListWrite } from "./listBook";
 import { dropCalcChain, moveRowCells, readSheet, setXml, shiftRowNumbers, unzipXlsx, workbookSheets, xmlText, zipXlsx, type ZipFiles } from "./ooxml";
-import { expectedMonthSheetName, readLengths, readPautRows, writePautLines, type PautLine, type SheetOwnership } from "./statementBook";
+import { expectedMonthSheetName, readLengths, readPautRows, readStatement, writePautLines, type PautLine, type SheetOwnership } from "./statementBook";
 import { diffSheet, toRangeWrites } from "./cellDiff";
 import { GraphError, listRowFormulas, type GraphCell, type GraphClient, type WorkbookSession } from "../sync/graph";
 import { excelRowPatch } from "./liveList";
 import { copyRowFormat } from "../sync/rowFormat";
 
 /** 이 기기에 사본을 두는 통합 문서. 검사리스트는 두 파일(평택 list, 군포·마전 listGm). */
-export type BookKind = SyncFile | "listGm";
+export type BookKind = SyncFile | "listGm" | "statementAj";
 
 /** 설정의 파일. 군포·마전은 예전 설정에 칸이 없으면(undefined) 드라이브 루트의 기본 파일을 쓴다. */
 export function fileOf(config: AppConfig, kind: BookKind): DriveFile | null {
   if (kind === "listGm") return config.files.listGm === undefined ? { ...LIST_GM_FILE } : config.files.listGm;
+  if (kind === "statementAj") return config.files.statementAj === undefined ? { ...STATEMENT_AJ_FILE } : config.files.statementAj;
   return config.files[kind];
 }
 
@@ -324,8 +325,38 @@ function groupsFor(records: InspectionRecord[], sites: string[], column: string,
   return [...map.entries()].map(([diameter, count]) => ({ diameter, count }));
 }
 
+/** 이 현장 명세서를 쓰는 파일. 아전 군포는 01(아전·승재) 파일(예전 설정에 statementBook 이 없어도). */
+export function statementBookOf(config: AppConfig, site: string): "statement" | "statementAj" {
+  const mapping = mappingFor(config.mappings, site);
+  if (mapping.statementBook === "statementAj") return "statementAj";
+  return site.replace(/\s+/g, "").replace(/PA$/i, "") === "아전군포" ? "statementAj" : "statement";
+}
+
+/** 01(아전·승재) 파일에서 아전 시트의 이름 앞부분과 단가를 읽는다. 시트 이름은 '아전…26.11' 처럼 연·월로 끝난다. */
+export function detectAjStatement(files: ZipFiles): { prefix: string; unitPrice: number | null } | null {
+  const refs: StatementSheetRef[] = [];
+  for (const { name } of workbookSheets(files)) {
+    if (!name.replace(/\s+/g, "").includes("아전")) continue;
+    const m = name.match(/^(.*?)(\s*)(\d{2})(\.?)(\d{1,2})(.*)$/);
+    if (!m || !m[1].trim()) continue;
+    const ref = matchStatementSheet(name, m[1]);
+    if (ref && !/AM/i.test(ref.suffix)) refs.push(ref);
+  }
+  if (!refs.length) return null;
+  refs.sort((a, b) => sheetSortKey(b) - sheetSortKey(a));
+  const prefix = refs[0].prefix;
+  let unitPrice: number | null = null;
+  for (const ref of refs.filter((r) => r.prefix === prefix)) {
+    unitPrice = readStatement(files, ref.name).unitPrice;
+    if (unitPrice) break;
+  }
+  return { prefix, unitPrice };
+}
+
 export function statementSkipReason(config: AppConfig, site: string): string | undefined {
   const mapping = mappingFor(config.mappings, site);
+  // 아전 군포: 접두어·단가는 동기화 때 01 파일에서 읽는다(못 읽으면 그때 안내).
+  if (statementBookOf(config, site) === "statementAj" && !mapping.prefixConfirmed) return undefined;
   if (!mapping.prefixConfirmed || !mapping.statementPrefix) return "거래명세서 접두어가 확정되지 않아 그 파일은 건너뛰었습니다.";
   if (mapping.unitPrice == null) return "단가가 없어 거래명세서 금액은 쓰지 않았습니다.";
   return undefined;
@@ -918,7 +949,40 @@ interface MonthGroup {
 }
 
 async function statementStep(args: GraphSyncArgs, run: Run, jobs: InspectionRecord[], candidates: InspectionRecord[], all: InspectionRecord[]): Promise<void> {
-  const { config, client } = args;
+  for (const book of ["statement", "statementAj"] as const) {
+    const mine = (r: InspectionRecord) => statementBookOf(args.config, r.site) === book;
+    if (!jobs.some(mine) && !candidates.some(mine)) continue;
+    await statementStepFor(book, args, run, jobs.filter(mine), candidates.filter(mine), all);
+  }
+}
+
+/** 아전 군포처럼 접두어·단가를 파일에서 읽는 현장: 읽은 값으로 설정을 채운 사본. 못 읽으면 그 현장 이름 목록. */
+function withDetectedAj(config: AppConfig, files: ZipFiles, sites: string[]): { config: AppConfig; unresolved: string[] } {
+  const need = sites.filter((site) => !mappingFor(config.mappings, site).prefixConfirmed);
+  if (!need.length) return { config, unresolved: [] };
+  const found = detectAjStatement(files);
+  if (!found?.prefix || found.unitPrice == null) return { config, unresolved: need };
+  const mappings = [...config.mappings];
+  for (const site of need) {
+    const at = mappings.findIndex((m) => m.site === site);
+    const next = { ...mappingFor(config.mappings, site), statementPrefix: found.prefix, prefixConfirmed: true, unitPrice: found.unitPrice, priceConfirmed: true };
+    if (at >= 0) mappings[at] = next;
+    else mappings.push(next);
+  }
+  return { config: { ...config, mappings }, unresolved: [] };
+}
+
+async function statementStepFor(
+  book: "statement" | "statementAj",
+  args0: GraphSyncArgs,
+  run: Run,
+  jobs: InspectionRecord[],
+  candidates: InspectionRecord[],
+  all: InspectionRecord[],
+): Promise<void> {
+  let args = args0;
+  const { client } = args;
+  let config = args.config;
   const owned = args.ownership ?? ownership;
   const groups = new Map<string, MonthGroup>();
   const verify = new Map<string, MonthGroup>();
@@ -957,18 +1021,32 @@ async function statementStep(args: GraphSyncArgs, run: Run, jobs: InspectionReco
     return;
   }
   const allRecs = [...groups.values(), ...verify.values()].flatMap((g) => g.recs);
-  const file = run.file("statement");
-  if (!file?.id) {
-    run.fail("statement", allRecs, new Error("설정에서 거래명세서 파일을 고르세요."));
+  const file = run.file(book);
+  if (!file?.id && !(book === "statementAj" && file?.name)) {
+    run.fail("statement", allRecs, new Error(book === "statementAj" ? "설정에서 아전·승재 거래명세서 파일을 고르세요." : "설정에서 거래명세서 파일을 고르세요."));
     return;
   }
   try {
-    for (const g of [...groups.values(), ...verify.values()]) g.lines = statementLines(g.site, g.ym, all, config);
-    const got = await fetchWorkbook(client, file);
-    run.found("statement", got.file);
+    const got = await fetchWorkbook(client, file!);
+    run.found(book, got.file);
     const itemId = got.file.id;
-    moveOwnership(owned, file.id, itemId);
+    moveOwnership(owned, file!.id, itemId);
     const before = unzipXlsx(got.value);
+    if (book === "statementAj") {
+      const sites = [...new Set([...groups.values(), ...verify.values()].map((g) => g.site))];
+      const detected = withDetectedAj(config, before, sites);
+      if (detected.unresolved.length) {
+        const message = `${got.file.name} 에서 아전 시트(예: 아전군포26.11)나 그 단가를 찾지 못했어요`;
+        for (const g of [...groups.values(), ...verify.values()]) if (detected.unresolved.includes(g.site)) run.mark(g.recs, "statement", "wait", message);
+        for (const key of [...groups.keys()]) if (detected.unresolved.includes(groups.get(key)!.site)) groups.delete(key);
+        for (const key of [...verify.keys()]) if (detected.unresolved.includes(verify.get(key)!.site)) verify.delete(key);
+        if (run.report.files.statement.status !== "error") run.report.files.statement = { status: "skip", message };
+      }
+      config = detected.config;
+      args = { ...args, config };
+      for (const g of [...groups.values(), ...verify.values()]) g.prefix = mappingFor(config.mappings, g.site).statementPrefix;
+    }
+    for (const g of [...groups.values(), ...verify.values()]) g.lines = statementLines(g.site, g.ym, all, config);
 
     // 백필: 그 달 시트에 이 날짜·관경 줄이 없을 때만 채운다.
     for (const [key, g] of verify) {
@@ -1031,11 +1109,12 @@ async function statementStep(args: GraphSyncArgs, run: Run, jobs: InspectionReco
         await wb.close();
       }
     }
-    run.ok("statement", plans.length);
+    const prevCount = run.report.files.statement.status === "ok" ? run.report.files.statement.count ?? 0 : 0;
+    run.ok("statement", prevCount + plans.length);
     if (missingSheets.length && run.report.files.statement.status !== "error") {
       run.report.files.statement = { ...run.report.files.statement, message: missingSheetsText(missingSheets) };
     }
-    work.statement = after;
+    if (book === "statement") work.statement = after;
   } catch (error) {
     run.fail("statement", allRecs.filter((r) => r.steps?.statement?.status !== "done"), error);
   }

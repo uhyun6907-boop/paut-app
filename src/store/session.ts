@@ -927,6 +927,18 @@ function applyOutcome(pending: InspectionRecord[], outcome: GraphSyncOutcome): v
 
 let initOnce: Promise<void> | null = null;
 
+/** 아전 군포 기록의 명세서 '건너뜀' 표시를 지운다. 바꿨으면 true. */
+export function reopenAjeonStatement(records: InspectionRecord[]): boolean {
+  let changed = false;
+  for (const rec of records) {
+    if (rec.site.replace(/\s+/g, "").replace(/PA$/i, "") !== "아전군포") continue;
+    if (rec.steps?.statement?.status !== "skip") continue;
+    rec.steps = { ...rec.steps, statement: undefined };
+    changed = true;
+  }
+  return changed;
+}
+
 export function initSession(): Promise<void> {
   if (!initOnce) initOnce = doInit().catch((error) => {
     initOnce = null;
@@ -993,6 +1005,9 @@ async function doInit(): Promise<void> {
       forgetLegacyUnsaved();
     }
     if (records && rerouteGmRecords(records)) await kvSet("records", records);
+    // 예전 판은 아전 군포 명세서를 '건너뜀'으로 남겼다. 이제 01(아전·승재) 파일에 쓰므로 그 표시를 지워
+    // 백필(최근 62일)이 01 파일의 그 날짜·관경 줄을 확인하고 없으면 채우게 한다.
+    if (records && reopenAjeonStatement(records)) await kvSet("records", records);
     const knownSites = sitesOf(records);
     if (!meta.lastSite || !knownSites.includes(meta.lastSite)) {
       meta.lastSite = knownSites.includes("드림 합정주공") ? "드림 합정주공" : knownSites[0] || "";

@@ -96,11 +96,12 @@ export function defaultMappings(): SiteMapping[] {
     {
       site: "아전 군포 PA",
       iljiColumn: "아전 군포",
+      statementBook: "statementAj",
       statementPrefix: "",
       prefixConfirmed: false,
       unitPrice: null,
       priceConfirmed: false,
-      priceNote: "명세서는 아직 쓰지 않습니다(건너뜀). 작업일지는 '아전 군포' 열.",
+      priceNote: "명세서는 '01_PAUT 거래명세서 (아전, 승재)' 파일의 아전 시트. 시트 이름 앞부분·단가는 그 파일의 최근 아전 시트에서 읽습니다. 작업일지는 '아전 군포' 열.",
     },
   ];
 }

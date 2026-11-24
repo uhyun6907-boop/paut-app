@@ -31,7 +31,6 @@ import {
   restoreStatementOwnership,
   syncGraph,
   syncPendingDemo,
-  statementSkipReason,
   type GraphSyncArgs,
 } from "./engine";
 import { readIljiDay } from "./iljiBook";
@@ -262,8 +261,8 @@ describe("Graph 동기화: 네 번째 파일(군포·마전 리스트)", () => {
     expect(mjStep?.list?.status).toBe("done");
     expect(mjStep?.ilji?.status).toBe("done");
     expect(mjStep?.statement).toMatchObject({ status: "wait", message: "11월 거래명세서 시트를 만들어주세요 (지성 마전 26.11)" });
-    // 아전 군포: 명세서는 아직 쓰지 않는다(접두어 미확정 → 건너뜀).
-    expect(out.steps.get(jobs[7].id)?.statement).toMatchObject({ status: "skip", message: statementSkipReason(graphConfig(), "아전 군포 PA") });
+    // 아전 군포: 명세서는 01(아전·승재) 파일의 아전군포26.11 시트에.
+    expect(out.steps.get(jobs[7].id)?.statement).toMatchObject({ status: "done" });
     expect(out.report.files.statement.status).not.toBe("error");
   });
 

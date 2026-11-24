@@ -451,6 +451,12 @@ export class GraphClient {
    * 찾지 못하면 DriveFileMissing.
    */
   async withFile<T>(file: DriveFile, use: (itemId: string) => Promise<T>): Promise<{ value: T; file: DriveFile }> {
+    if (!file.id) {
+      // 아직 ID 를 모르는 파일(이름만 아는 기본 파일): 이름으로 바로 찾는다.
+      const found = file.name ? await this.findFileByName(file.name) : null;
+      if (!found) throw new DriveFileMissing(file.name || "(이름 없음)");
+      return { value: await use(found.id), file: { id: found.id, name: found.name } };
+    }
     try {
       return { value: await use(file.id), file };
     } catch (error) {

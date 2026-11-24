@@ -29,6 +29,12 @@ export const LIST_BOOK_LABEL: Record<ListBookKind, string> = {
 };
 
 /** 군포·마전 리스트(OneDrive 드라이브 루트). 설정에서 다른 파일을 고르면 그 값이 우선. */
+/** 아전·승재 거래명세서. 아전 군포 PA 의 명세서는 이 파일에 쓴다. 설정에서 고르지 않았으면 이 이름으로 OneDrive 에서 찾는다. */
+export const STATEMENT_AJ_FILE = {
+  id: "",
+  name: "01_PAUT 거래명세서 (아전, 승재).xlsx",
+} as const;
+
 export const LIST_GM_FILE = {
   id: "73DF94A06E5230E0!sb824baa8e2754d6b9cf87409b76546b5",
   name: "PAUT NDT 리스트(군포, 마전).xlsx",
@@ -153,6 +159,8 @@ export interface SiteMapping {
   site: string;
   /** 작업일지 관경/개소 열 이름. 없는 현장은 '그 외'. */
   iljiColumn: string;
+  /** 이 현장 명세서를 쓰는 파일. 없으면 거래명세서(02, 지성·드림). */
+  statementBook?: "statementAj";
   /** 거래명세서 시트 이름 앞부분. 비어 있으면 시트를 만들지 않습니다. */
   statementPrefix: string;
   /** 사용자가 접두어를 확인했거나, 파일에서 시트를 찾았으면 true. */
@@ -178,6 +186,8 @@ export interface AppConfig {
     listGm?: DriveFile | null;
     ilji: DriveFile | null;
     statement: DriveFile | null;
+    /** 아전·승재 거래명세서(01). 예전 설정에는 없다(undefined → STATEMENT_AJ_FILE 이름으로 찾기). */
+    statementAj?: DriveFile | null;
   };
   mappings: SiteMapping[];
   /** 관경(A) → 용접길이(m) */

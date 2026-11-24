@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { useDrill } from "./drill";
-import { ILJI_COLUMNS, LIST_GM_FILE, type AppConfig, type SiteMapping } from "../domain/types";
+import { ILJI_COLUMNS, LIST_GM_FILE, STATEMENT_AJ_FILE, type AppConfig, type SiteMapping } from "../domain/types";
 import { listChildren, searchDrive, type DriveItem } from "../sync/graph";
 import { accessToken, redirectUri, resolveClientId } from "../sync/msal";
 import { resetSamples, saveConfig, signIn, signOut, useOneDriveFile, useSession } from "../store/session";
@@ -14,16 +14,21 @@ const FILE_LABEL: Record<BookKind, string> = {
   list: "비파괴검사 리스트 (평택: 택지·브레인·합정주공·화양)",
   listGm: "비파괴검사 리스트 (지성 군포·아전 군포·지성 마전)",
   ilji: "작업일지",
-  statement: "거래명세서",
+  statement: "거래명세서 (지성·드림)",
+  statementAj: "거래명세서 (아전·승재 — 아전 군포)",
 };
 
-const FILE_ORDER: readonly BookKind[] = ["list", "listGm", "ilji", "statement"];
+const FILE_ORDER: readonly BookKind[] = ["list", "listGm", "ilji", "statement", "statementAj"];
 
 /** 설정에 보일 파일 이름. 군포·마전 리스트는 따로 고르지 않았으면 드라이브 루트의 기본 파일. */
 function fileName(config: AppConfig, kind: BookKind): string {
   if (kind === "listGm") {
     if (config.files.listGm === undefined) return `${LIST_GM_FILE.name} (드라이브 루트, 자동)`;
     return config.files.listGm?.name || "고르지 않음";
+  }
+  if (kind === "statementAj") {
+    if (config.files.statementAj === undefined) return `${STATEMENT_AJ_FILE.name} (이름으로 자동 찾기)`;
+    return config.files.statementAj?.name || "고르지 않음";
   }
   return config.files[kind]?.name || "데모 샘플 사용 중";
 }
@@ -177,7 +182,7 @@ export function SettingsScreen() {
               <strong>{FILE_LABEL[kind]}</strong>
               <div className="sub" style={{ color: "var(--muted)", fontSize: 12 }}>{fileName(draft, kind)}</div>
             </div>
-            <button className="btn small" type="button" onClick={() => void openPicker(kind)}>{draft.files[kind] || kind === "listGm" ? "바꾸기" : "엑셀 고르기"}</button>
+            <button className="btn small" type="button" onClick={() => void openPicker(kind)}>{draft.files[kind] || kind === "listGm" || kind === "statementAj" ? "바꾸기" : "엑셀 고르기"}</button>
           </div>
         ))}
         <p className="nav-hint">검사리스트는 두 파일입니다. 현장(시트)마다 자기 리스트 파일에만 씁니다: 지성 군포 PA·아전 군포 PA·지성 마전 PA 는 군포·마전 리스트, 나머지는 평택 리스트. 네 파일 모두 바뀐 칸만 씁니다(파일 전체를 덮어쓰지 않음). PC 엑셀에서 같은 파일을 편집 중이면 잠김으로 실패할 수 있습니다. 그때는 PC에서 저장하고 닫은 뒤 화면 위의 다시 시도를 누르세요.</p>
