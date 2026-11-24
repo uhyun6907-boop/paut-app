@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { buildBill, recordsForMonth } from "../domain/billing";
 import { DayHistory } from "./DayHistory";
+import { sizeFromLine } from "../domain/size";
+import { PAUT_OD } from "../domain/reference";
 import { defectStats, latestLine, lineSummary, linesByLatestDate, shortDate, sortLineRows } from "../domain/history";
 import {
   canonicalPoint,
@@ -180,6 +182,8 @@ export function EntryView() {
   }
 
   const summary = meta.activeLine ? lineSummary(siteRecords, meta.activeLine) : "";
+  /** 라인 이름의 관경(예: 750A)으로 찾은 인치·스캔 길이(위상배열초음파검사 기본 SETTING 표). */
+  const lineSize = meta.activeLine ? sizeFromLine(meta.activeLine, PAUT_OD) : null;
   const today = siteRecords.filter((rec) => rec.date === meta.workDate && rec.result !== "없음");
   const pass = today.filter((rec) => rec.result === PASS).length;
   const fail = today.filter((rec) => rec.result === FAIL).length;
@@ -391,6 +395,12 @@ export function EntryView() {
         <span className="meta-copy">
           <span className="k">라인</span>
           <strong>{meta.activeLine || "라인 선택"}</strong>
+          {lineSize && (
+            <small className="line-scan">
+              {lineSize.label}
+              {lineSize.scan != null ? <> · 스캔 <b>{lineSize.scan.toLocaleString("ko-KR")} mm</b></> : null}
+            </small>
+          )}
           {summary && <small><SummaryText text={summary} /></small>}
         </span>
         <span className="chev" aria-hidden="true">›</span>
