@@ -95,25 +95,32 @@ async function readError(res: Response): Promise<string> {
   }
 }
 
+function childrenUrl(parent: string): string {
+  const base = parent === "root" ? `${GRAPH}/me/drive/root` : `${GRAPH}/me/drive/items/${encodeURIComponent(parent)}`;
+  return `${base}/children?$top=200&$select=id,name,folder,file,size,lastModifiedDateTime`;
+}
+
 export async function listChildren(token: string, parentId: string | "root"): Promise<DriveItem[]> {
-  const url =
-    parentId === "root"
-      ? `${GRAPH}/me/drive/root/children?$top=200&$select=id,name,folder,file,size`
-      : `${GRAPH}/me/drive/items/${encodeURIComponent(parentId)}/children?$top=200&$select=id,name,folder,file,size`;
-  const res = await graphFetch(url, token);
+  const res = await graphFetch(childrenUrl(parentId), token);
   if (!res.ok) throw new Error(await readError(res));
   const json = (await res.json()) as { value: DriveItem[] };
   return json.value || [];
 }
 
+/**
+ * 파일 고르기 첫 목록: 루트와 루트 바로 아래 폴더들의 xlsx(검색 색인과 상관없이 보임) + 검색 결과.
+ * OneDrive 검색은 하위 폴더의 파일을 늦게(또는 아예) 돌려주지 않을 때가 있다.
+ */
 export async function listXlsxFiles(token: string): Promise<DriveItem[]> {
   const queries = ["xlsx", "비파괴", "작업일지", "거래명세"];
+  const root = await listChildren(token, "root").catch(() => [] as DriveItem[]);
+  const folders = root.filter((item) => item.folder).slice(0, 40);
   const batches = await Promise.all([
-    listChildren(token, "root").catch(() => [] as DriveItem[]),
+    ...folders.map((folder) => listChildren(token, folder.id).catch(() => [] as DriveItem[])),
     ...queries.map((query) => searchDrive(token, query).catch(() => [] as DriveItem[])),
   ]);
   const map = new Map<string, DriveItem>();
-  for (const item of batches.flat()) {
+  for (const item of [root, ...batches].flat()) {
     if (item.folder) continue;
     if (!item.name.toLowerCase().endsWith(".xlsx")) continue;
     map.set(item.id, item);
@@ -461,6 +468,9 @@ export class GraphClient {
     const wanted = name.normalize("NFC");
     const atRoot = await this.itemAtRoot(name);
     if (atRoot && !atRoot.folder && atRoot.name.normalize("NFC") === wanted) return atRoot;
+    // 검색 색인과 상관없이 폴더를 직접 훑는다(루트와 그 아래 두 단계).
+    const walked = await this.walkFolders(wanted);
+    if (walked) return walked;
     for (const query of searchQueriesFor(name)) {
       const hits = (await this.searchAll(query)).filter((item) => !item.folder && item.name.normalize("NFC") === wanted);
       if (hits.length) {
@@ -469,6 +479,37 @@ export class GraphClient {
       }
     }
     return null;
+  }
+
+  /** 루트부터 폴더를 차례로 열어(최대 두 단계 아래, 폴더 60개까지) 이름이 정확히 같은 파일을 찾는다. */
+  private async walkFolders(wanted: string): Promise<DriveItem | null> {
+    let level: string[] = ["root"];
+    let opened = 0;
+    for (let depth = 0; depth < 3 && level.length; depth++) {
+      const next: string[] = [];
+      for (const parent of level) {
+        if (opened >= 60) return null;
+        opened += 1;
+        const children = await this.children(parent);
+        const hit = children.find((item) => !item.folder && item.name.normalize("NFC") === wanted);
+        if (hit) return hit;
+        next.push(...children.filter((item) => item.folder).map((item) => item.id));
+      }
+      level = next;
+    }
+    return null;
+  }
+
+  /** 폴더 안 항목(다음 쪽까지). */
+  private async children(parent: string): Promise<DriveItem[]> {
+    let url: string | undefined = childrenUrl(parent);
+    const out: DriveItem[] = [];
+    for (let page = 0; url && page < 10; page++) {
+      const json: { value?: DriveItem[]; "@odata.nextLink"?: string } = await this.json(url);
+      out.push(...(json.value ?? []));
+      url = json["@odata.nextLink"];
+    }
+    return out;
   }
 
   /** 드라이브 루트의 이 이름 항목. 없으면 null. */

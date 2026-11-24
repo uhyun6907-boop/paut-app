@@ -206,8 +206,17 @@ export function SettingsScreen() {
                 void (async () => {
                   try {
                     const token = await accessToken(resolveClientId(draft.clientId));
-                    const found = query.trim() ? await searchDrive(token, query.trim()) : await listXlsxFiles(token);
-                    setItems(found.filter((item) => !item.folder && item.name.toLowerCase().endsWith(".xlsx")));
+                    const q = query.trim();
+                    const all = await listXlsxFiles(token);
+                    // 폴더를 훑은 목록에서 이름으로 거르고, OneDrive 검색 결과를 더한다(검색 색인에 없는 파일도 보이게).
+                    const found = q
+                      ? [
+                          ...all.filter((item) => item.name.normalize("NFC").toLowerCase().includes(q.normalize("NFC").toLowerCase())),
+                          ...(await searchDrive(token, q).catch(() => [] as DriveItem[])),
+                        ]
+                      : all;
+                    const seen = new Set<string>();
+                    setItems(found.filter((item) => !item.folder && item.name.toLowerCase().endsWith(".xlsx") && !seen.has(item.id) && !!seen.add(item.id)));
                     setPickError("");
                   } catch (error) {
                     setPickError(error instanceof Error ? error.message : "검색 실패");

@@ -1346,6 +1346,18 @@ describe("OneDrive 가 파일을 다시 올려 저장된 항목 ID 가 404 일 �
     expect(rowsOn("2026-11-12", "STMT-ROOT").map((r) => r.count)).toEqual([3]);
   });
 
+  it("OneDrive 검색이 하위 폴더 파일을 아예 돌려주지 않아도 폴더를 훑어 거래명세서를 찾는다", async () => {
+    seed([...realListRecords(), rec("S28", PASS)]);
+    await startApp();
+    drive.searchMisses = () => true;
+    drive.reupload(STMT_ID, STMT_NEW, STMT_FOLDER);
+    addPending(rec("S29", PASS));
+    const st = (await startApp()).getState();
+    expect(st.syncReport?.files.statement).toMatchObject({ status: "ok" });
+    expect(st.config.files.statement).toEqual({ id: STMT_NEW, name: "02_PAUT 거래명세서 (지성, 드림).xlsx" });
+    expect(rowsOn("2026-11-12", STMT_NEW).map((r) => r.count)).toEqual([2]);
+  });
+
   it("ID 도 정확한 이름도 없으면 그 파일만 실패하고 파일 이름을 말한다. 리스트·거래명세서는 그대로 보낸다", async () => {
     drive.items.delete(ILJI_ID);
     drive.put("ILJI-COPY", "PAUT 근무일지 사본.xlsx", fixture("real-worklog.xlsx"));

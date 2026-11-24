@@ -278,6 +278,18 @@ export class FakeDrive {
         ],
       });
     }
+    const kids = /^\/me\/drive\/(?:root|items\/folder:([^/?]+))\/children/.exec(path);
+    if (kids && method === "GET") {
+      const inFolder = kids[1] ?? undefined;
+      const files = [...this.items.entries()].filter(([, it]) => (it.folder || undefined) === inFolder);
+      const folders = inFolder ? [] : [...new Set([...this.items.values()].map((it) => it.folder).filter(Boolean))];
+      return json({
+        value: [
+          ...folders.map((name) => ({ id: `folder:${name}`, name, folder: {} })),
+          ...files.map(([id, it]) => ({ id, name: it.name, file: {}, lastModifiedDateTime: it.modified })),
+        ],
+      });
+    }
     const byPath = /^\/me\/drive\/root:\/([^?]+)/.exec(path);
     if (byPath && method === "GET") {
       const hit = [...this.items.entries()].find(([, it]) => !it.folder && it.name === byPath[1]);
