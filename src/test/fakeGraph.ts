@@ -66,6 +66,8 @@ export class FakeDrive {
   validToken = "token-1";
   /** 순서 확인용 사건 목록(토큰 받기·요청). */
   events: string[] = [];
+  /** 이 검색어에는 아무것도 돌려주지 않는다(실제 OneDrive 가 괄호·쉼표가 든 전체 이름 검색에 빈 결과를 주는 것 흉내). */
+  searchMisses: (query: string) => boolean = () => false;
   private sessionNo = 0;
   private formatEdits = new Map<string, FormatEdit>();
   private rowHeightEdits = new Map<string, number>();
@@ -266,6 +268,7 @@ export class FakeDrive {
     if (path === "/$batch" && method === "POST") return this.batch(init, headers);
     const search = /^\/me\/drive\/root\/search\(q='(.*)'\)/.exec(path);
     if (search && method === "GET") {
+      if (this.searchMisses(search[1].replace(/''/g, "'"))) return json({ value: [] });
       const words = search[1].replace(/''/g, "'").toLowerCase().split(/[\s(),_.]+/).filter(Boolean);
       const hits = [...this.items.entries()].filter(([, it]) => words.some((w) => it.name.toLowerCase().includes(w)));
       return json({
@@ -274,6 +277,11 @@ export class FakeDrive {
           ...hits.map(([id, it]) => ({ id, name: it.name, file: {}, lastModifiedDateTime: it.modified })),
         ],
       });
+    }
+    const byPath = /^\/me\/drive\/root:\/([^?]+)/.exec(path);
+    if (byPath && method === "GET") {
+      const hit = [...this.items.entries()].find(([, it]) => !it.folder && it.name === byPath[1]);
+      return hit ? json({ id: hit[0], name: hit[1].name, file: {}, lastModifiedDateTime: hit[1].modified }) : err(404, "itemNotFound");
     }
     const item = this.items.get(itemId);
     if (!item) return err(404, "itemNotFound");

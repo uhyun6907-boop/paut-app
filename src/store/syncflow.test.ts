@@ -1319,6 +1319,33 @@ describe("OneDrive 가 파일을 다시 올려 저장된 항목 ID 가 404 일 �
     expect(rowsOn("2026-11-12", STMT_NEW).map((r) => r.count)).toEqual([3]);
   });
 
+  it("OneDrive 검색이 괄호·쉼표가 든 전체 이름에 빈 결과를 줘도, 다시 올라간 거래명세서를 루트 경로나 낱말 검색으로 찾는다", async () => {
+    seed([...realListRecords(), rec("S28", PASS)]);
+    await startApp();
+    drive.searchMisses = (q) => /[(),]/.test(q);
+
+    // 하위 폴더로 다시 올라감: 루트 경로로는 없고, 「거래명세서」 낱말 검색으로 찾는다.
+    drive.reupload(STMT_ID, STMT_NEW, STMT_FOLDER);
+    const s29 = rec("S29", PASS);
+    addPending(s29);
+    let st = (await startApp()).getState();
+    expect(st.syncReport?.files.statement).toMatchObject({ status: "ok" });
+    expect(st.config.files.statement).toEqual({ id: STMT_NEW, name: "02_PAUT 거래명세서 (지성, 드림).xlsx" });
+    expect(rowsOn("2026-11-12", STMT_NEW).map((r) => r.count)).toEqual([2]);
+
+    // 루트에 다시 올라감: 검색 없이 경로로 바로 찾는다.
+    drive.reupload(STMT_NEW, "STMT-ROOT", "");
+    const items = drive.items.get("STMT-ROOT")!;
+    items.folder = undefined;
+    drive.log = [];
+    addPending(rec("S30", PASS));
+    st = (await startApp()).getState();
+    expect(st.syncReport?.files.statement).toMatchObject({ status: "ok" });
+    expect(st.config.files.statement?.id).toBe("STMT-ROOT");
+    expect(drive.requests((e) => e.path.includes("/search("))).toHaveLength(0);
+    expect(rowsOn("2026-11-12", "STMT-ROOT").map((r) => r.count)).toEqual([3]);
+  });
+
   it("ID 도 정확한 이름도 없으면 그 파일만 실패하고 파일 이름을 말한다. 리스트·거래명세서는 그대로 보낸다", async () => {
     drive.items.delete(ILJI_ID);
     drive.put("ILJI-COPY", "PAUT 근무일지 사본.xlsx", fixture("real-worklog.xlsx"));

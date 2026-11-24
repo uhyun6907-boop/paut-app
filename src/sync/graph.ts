@@ -121,6 +121,19 @@ export async function listXlsxFiles(token: string): Promise<DriveItem[]> {
   return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, "ko"));
 }
 
+/**
+ * 이름으로 파일을 찾을 때 차례로 쓸 검색어. 전체 이름, 확장자 뺀 이름, 그리고 이름 속 낱말(두 글자 이상, 긴 것부터).
+ * 예: 「02_PAUT 거래명세서 (지성, 드림).xlsx」 → 전체, 「02_PAUT 거래명세서 (지성, 드림)」, 「거래명세서」, 「PAUT」, 「지성」, 「드림」 …
+ */
+export function searchQueriesFor(name: string): string[] {
+  const stem = name.replace(/\.[^.]+$/, "");
+  const words = stem
+    .split(/[\s()[\]{},_.\-·]+/)
+    .filter((w) => w.length >= 2 && !/^\d+$/.test(w))
+    .sort((a, b) => b.length - a.length);
+  return [...new Set([name, stem, ...words])].slice(0, 6);
+}
+
 export async function searchDrive(token: string, query: string): Promise<DriveItem[]> {
   const q = query.replace(/'/g, "''");
   const url = `${GRAPH}/me/drive/root/search(q='${encodeURIComponent(q)}')?$top=40&$select=id,name,folder,file,size`;
@@ -438,19 +451,46 @@ export class GraphClient {
     }
   }
 
-  /** 이름이 정확히 같은 파일(하위 폴더 포함). 여럿이면 가장 최근에 고친 것. 부분 일치는 고르지 않는다. */
+  /**
+   * 이름이 정확히 같은 파일(하위 폴더 포함). 여럿이면 가장 최근에 고친 것. 부분 일치는 고르지 않는다.
+   * 1) 드라이브 루트에서 경로로 직접 연다(검색 색인과 상관없음).
+   * 2) 검색: 전체 이름 → 확장자 뺀 이름 → 이름 속 낱말(예: 「거래명세서」) 순서로, 결과에서 정확히 같은 이름만 고른다.
+   *    OneDrive 검색은 괄호·쉼표가 든 전체 이름으로는 아무것도 돌려주지 않을 때가 있어, 낱말 검색까지 해 본다.
+   */
   private async findFileByName(name: string): Promise<DriveItem | null> {
     const wanted = name.normalize("NFC");
-    const q = encodeURIComponent(name.replace(/'/g, "''"));
+    const atRoot = await this.itemAtRoot(name);
+    if (atRoot && !atRoot.folder && atRoot.name.normalize("NFC") === wanted) return atRoot;
+    for (const query of searchQueriesFor(name)) {
+      const hits = (await this.searchAll(query)).filter((item) => !item.folder && item.name.normalize("NFC") === wanted);
+      if (hits.length) {
+        hits.sort((a, b) => (b.lastModifiedDateTime ?? "").localeCompare(a.lastModifiedDateTime ?? ""));
+        return hits[0];
+      }
+    }
+    return null;
+  }
+
+  /** 드라이브 루트의 이 이름 항목. 없으면 null. */
+  private async itemAtRoot(name: string): Promise<DriveItem | null> {
+    try {
+      return await this.json<DriveItem>(`${GRAPH}/me/drive/root:/${encodeURIComponent(name)}?$select=id,name,file,folder,lastModifiedDateTime`);
+    } catch (error) {
+      if (error instanceof GraphError && (error.status === 404 || error.status === 400)) return null;
+      throw error;
+    }
+  }
+
+  private async searchAll(query: string): Promise<DriveItem[]> {
+    const q = encodeURIComponent(query.replace(/'/g, "''"));
     let url: string | undefined = `${GRAPH}/me/drive/root/search(q='${q}')?$top=200&$select=id,name,file,folder,lastModifiedDateTime`;
     const hits: DriveItem[] = [];
     for (let page = 0; url && page < 10; page++) {
       const json: { value?: DriveItem[]; "@odata.nextLink"?: string } = await this.json(url);
-      hits.push(...(json.value ?? []).filter((item) => !item.folder && item.name.normalize("NFC") === wanted));
+      hits.push(...(json.value ?? []));
       url = json["@odata.nextLink"];
     }
-    hits.sort((a, b) => (b.lastModifiedDateTime ?? "").localeCompare(a.lastModifiedDateTime ?? ""));
-    return hits[0] ?? null;
+    return hits;
   }
 
   async download(itemId: string): Promise<Uint8Array> {
