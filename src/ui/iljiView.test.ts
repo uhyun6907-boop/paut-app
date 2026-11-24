@@ -226,3 +226,20 @@ describe("입력 탭 날짜별 기록 · 일지·리스트 탭 수정 연동", (
     expect(copy["2026-11-24"].workers).toEqual(["조우현", "심명보"]);
   });
 });
+
+describe("일지 탭을 열면 날짜별 기록의 근무자·시간이 엑셀 값으로 맞춰진다", () => {
+  it("엑셀(PC 에서 고친 것 포함) 날짜 행의 검사자·시간을 그날 값으로. 보내는 중인 기록이 있는 날은 앱 값을 둔다", async () => {
+    const { adoptIljiDays } = await import("../store/session");
+    const { rowStaff } = await import("../excel/liveIlji");
+    const table = await load();
+    Object.assign(getState(), {
+      meta: meta({ workDate: "2026-11-12", dayStaff: { "2026-11-03": { dayType: "평일", insp1: "옛값", insp2: "", timeStart: "09:00", timeEnd: "18:00" } } }),
+      records: [],
+    });
+    const rows = table.rows.filter((r) => r.date).map((r) => ({ date: r.date, ...rowStaff(table, r) }));
+    expect(await adoptIljiDays(rows)).toBeGreaterThan(0);
+    expect(getState().meta.dayStaff?.["2026-11-03"]).toEqual({ dayType: "평일", insp1: "조우현", insp2: "김정환", timeStart: "13:00", timeEnd: "17:30" });
+    // 다시 해도 바뀌는 것 없음
+    expect(await adoptIljiDays(rows)).toBe(0);
+  });
+});

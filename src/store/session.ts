@@ -2182,6 +2182,41 @@ export function adoptIljiDayStaff(date: string, row: StaffEdit & { dayType: stri
 }
 
 /**
+ * 일지 탭이 OneDrive 작업일지를 새로 읽은 뒤: 날짜 행마다 그날 값(dayStaff)을 엑셀에 맞춘다(엑셀이 기준 — PC 엑셀에서 고친 것도).
+ * 입력 탭 「날짜별 기록」의 근무자·시간이 이 값을 쓴다. 엑셀로 다시 보내지 않는다.
+ * 건너뛰는 날: 엑셀 행에 검사자·시간이 하나도 없는 날, 그날 아직 엑셀에 다 보내지 않은 기록이 있는 날(앱 값이 곧 엑셀로 감).
+ * 돌려주는 값: 바꾼 날 수.
+ */
+export function adoptIljiDays(rows: (StaffEdit & { date: string; dayType: string })[]): Promise<number> {
+  return enqueue(async () => {
+    const busy = new Set(state.records.filter((r) => !r.deleted && r.sync !== "synced").map((r) => r.date));
+    const dayStaff = { ...(state.meta.dayStaff ?? {}) };
+    let workDay: DayStaff | null = null;
+    let changed = 0;
+    const seen = new Set<string>();
+    for (const row of rows) {
+      // 같은 날짜 행이 둘이면(야간 등) 첫 행이 그날 값.
+      if (seen.has(row.date)) continue;
+      seen.add(row.date);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(row.date) || busy.has(row.date)) continue;
+      if (!row.insp1 && !row.insp2 && !row.timeStart && !row.timeEnd) continue;
+      const prev = dayStaff[row.date];
+      const dayType: DayStaff["dayType"] = row.dayType === "평일" || row.dayType === "공휴일" ? row.dayType : prev?.dayType ?? defaultDayType(row.date);
+      const next: DayStaff = { dayType, insp1: row.insp1, insp2: row.insp2, timeStart: row.timeStart, timeEnd: row.timeEnd };
+      if (prev && JSON.stringify(prev) === JSON.stringify(next)) continue;
+      dayStaff[row.date] = next;
+      if (row.date === state.meta.workDate) workDay = next;
+      changed += 1;
+    }
+    if (!changed) return 0;
+    state.meta = { ...state.meta, ...(workDay ?? {}), dayStaff };
+    patch({ meta: state.meta });
+    await persistMeta();
+    return changed;
+  });
+}
+
+/**
  * 리스트 탭이 엑셀에서 새로 읽은 표로, Y(앱 ID)가 같은 저장된 카드를 엑셀 값·행 번호(excelRow)에 맞춘다(엑셀이 기준).
  * 엑셀로 다시 보내지 않고 미저장으로 만들지 않는다. 빈 칸은 카드 값을 지우지 않는다.
  * 대기·실패 카드도 맞춘다(날짜가 바뀌어도 movedFrom·단계 표시는 그대로). 미저장·보내는 중 카드는 건드리지 않는다.

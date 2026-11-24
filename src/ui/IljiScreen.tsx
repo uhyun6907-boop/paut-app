@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent }
 import { iljiInput, iljiText, loadIlji, planIljiEdit, rowStaff, writeIljiCell, LOCK_TEXT, type IljiCell, type IljiEditPlan, type IljiTable } from "../excel/liveIlji";
 import { LiveConflictError } from "../excel/liveList";
 import { columnIndex } from "../excel/ooxml";
-import { adoptIljiDayStaff, getState, graphReadOk, liveListClient, rememberFile, signIn, useSession } from "../store/session";
+import { adoptIljiDayStaff, adoptIljiDays, getState, graphReadOk, liveListClient, rememberFile, signIn, useSession } from "../store/session";
 import { GraphError, type GraphClient } from "../sync/graph";
 import { isLoginError } from "../sync/authState";
 import { isTimeoutLike } from "../sync/timeout";
@@ -212,6 +212,8 @@ export function IljiScreen() {
       graphReadOk();
       if (res.table.file.id !== getState().config.files.ilji?.id) await rememberFile("ilji", res.table.file);
       setView({ status: "ok", table: res.table });
+      // 입력 탭 「날짜별 기록」이 엑셀의 그날 검사자·시간을 바로 쓰게(PC 엑셀에서 고친 것 포함).
+      void adoptIljiDays(res.table.rows.filter((r) => r.date).map((r) => ({ date: r.date, ...rowStaff(res.table, r) })));
       setMonth((m) => (keepMonth && res.table.months.includes(m) ? m : defaultMonth(res.table, getState().meta.workDate)));
     } catch (error) {
       if (no === loadNo.current) setView({ status: "error", message: iljiErrorText(error) });
