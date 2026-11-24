@@ -477,8 +477,8 @@ export function EntryView() {
         </>
       )}
 
-      {/* 날짜별 기록: 위 '검사 기록'(라인별)은 그대로 두고 그 아래에 더한다. 「수정」으로 저장된 기록을 고친다. */}
-      {site && <DayHistory records={siteRecords} site={site} sites={sites} />}
+      {/* 날짜별 기록: 위 '검사 기록'(라인별)은 그대로 두고 그 아래에 더한다. 읽기만 한다. */}
+      {site && <DayHistory records={siteRecords} site={site} />}
 
       <div className="bottom-dock">
         <button

@@ -627,16 +627,3 @@ button.mini strong { color: var(--text); font-size: 15px; font-weight: 800; }
 .xg-pop-title { font-size: 11px; font-weight: 700; color: var(--muted); }
 .xg-wrap.ilji-edit { min-height: 300px; }
 .xg.ilji .xg-pop { width: 200px; min-width: 0; }
-
-/* 입력 탭 날짜별 기록 「수정」 */
-.day-edit-btn { margin: 4px 0 10px; }
-.day-editor { display: grid; gap: 8px; padding: 8px 0 12px; }
-.day-editor .de-f { display: grid; gap: 2px; font-size: 12px; font-weight: 800; color: var(--muted); min-width: 0; }
-.day-editor .de-f .field-input { min-width: 0; width: 100%; box-sizing: border-box; }
-.day-editor .de-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.day-editor .de-line { display: grid; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 12px; }
-.day-editor .de-pt { display: grid; grid-template-columns: 1fr 1fr auto; gap: 6px; align-items: center; }
-.day-editor .de-pt .field-input { min-width: 0; width: 100%; box-sizing: border-box; }
-.day-editor .de-pt.removed .field-input { text-decoration: line-through; opacity: .5; }
-.day-editor .btn.danger { color: #d70015; border-color: #d70015; }
-.day-editor .de-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
