@@ -1037,6 +1037,13 @@ async function statementStepFor(
           .findSibling(sibling.id, target.name, (n) => n.replace(/\s+/g, "").includes("아전") && n.includes("거래명세"))
           .catch(() => null);
         if (near) target = { id: near.id, name: near.name };
+        else {
+          // .xlsx 가 아닌 01 파일(.xls·.xlsm)이 옆에 있으면 왜 못 쓰는지 알려 준다.
+          const other = await client
+            .findSibling(sibling.id, "", (n) => n.replace(/\s+/g, "").includes("아전") && n.includes("거래명세") && /\.(xls|xlsm|xlsb)$/i.test(n), true)
+            .catch(() => null);
+          if (other) throw new Error(`「${other.name}」은 ${other.name.split(".").pop()} 형식이라 앱이 쓸 수 없어요. PC 엑셀에서 「다른 이름으로 저장 → Excel 통합 문서(.xlsx)」로 저장해 주세요.`);
+        }
       }
     }
     const got = await fetchWorkbook(client, target);

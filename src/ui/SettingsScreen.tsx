@@ -57,8 +57,9 @@ export function SettingsScreen() {
   /** 늦게 온 응답이 새 화면을 덮지 않게. */
   const loadNo = useRef(0);
 
+  /** 목록에 보일 엑셀 파일(.xlsx 말고 .xls·.xlsm·.xlsb 도 — 왜 못 쓰는지 알려 주려고 보인다). */
   function isXlsx(item: DriveItem): boolean {
-    return !item.folder && item.name.toLowerCase().endsWith(".xlsx");
+    return !item.folder && /\.(xlsx|xlsm|xls|xlsb)$/i.test(item.name);
   }
 
   /** 이미 고른 파일과 같은 폴더에서 찾은 엑셀. 숨김 폴더 안에 있어도 보인다. */
@@ -306,9 +307,16 @@ export function SettingsScreen() {
                 📁 {item.name}
               </button>
             ) : (
-              <button key={item.id} className="choice" type="button" onClick={() => void choose(item)}>
-                {item.name}
-              </button>
+              /\.xlsx$/i.test(item.name) ? (
+                <button key={item.id} className="choice" type="button" onClick={() => void choose(item)}>
+                  {item.name}
+                </button>
+              ) : (
+                <button key={item.id} className="choice off" type="button" disabled>
+                  {item.name}
+                  <span className="sub">{`${item.name.split(".").pop()} 형식이라 앱이 쓸 수 없어요 — PC 엑셀에서 「다른 이름으로 저장 → Excel 통합 문서(.xlsx)」로 저장한 뒤 그 파일을 고르세요`}</span>
+                </button>
+              )
             ),
           )}
           <button className="btn block" type="button" onClick={() => setPicker(null)}>닫기</button>

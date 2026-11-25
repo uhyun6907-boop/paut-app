@@ -104,3 +104,16 @@ describe("예전 판이 건너뛴 아전 군포 명세서", () => {
     expect(reopenAjeonStatement([a, other])).toBe(false);
   });
 });
+
+describe("01 파일이 .xlsx 가 아니면", () => {
+  it("02 옆에 '01_PAUT 거래명세서 (아전, 승재).xls' 만 있으면 형식 때문에 못 쓴다고 알려 주고 아무것도 쓰지 않는다", async () => {
+    const d = realDrive({ ajeon: false });
+    d.items.get(STMT_ID)!.folder = "00_PAUT 거래명세서";
+    d.put("AJ-XLS", "01_PAUT 거래명세서 (아전, 승재).xls", d.bytes(STMT_ID), { folder: "00_PAUT 거래명세서" });
+    d.searchMisses = () => true;
+    const jobs = [aj("S1", { date: "2026-12-03" })];
+    const out = await syncGraph({ client: client(d), jobs, all: jobs, config: graphConfig(), meta: meta(), sleep: async () => undefined });
+    expect(out.steps.get(jobs[0].id)?.statement?.message).toContain("xls 형식이라 앱이 쓸 수 없어요");
+    expect(d.requests((e) => e.method !== "GET" && e.item === "AJ-XLS")).toHaveLength(0);
+  });
+});
