@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { buildBill, recordsForMonth } from "../domain/billing";
 import { DayHistory } from "./DayHistory";
+import { SaveReview } from "./SaveReview";
 import { sizeFromLine } from "../domain/size";
 import { PAUT_OD } from "../domain/reference";
 import { defectStats, latestLine, lineSummary, linesByLatestDate, shortDate, sortLineRows } from "../domain/history";
@@ -22,7 +23,6 @@ import {
   addInspector,
   changeRecordDate,
   clearGreyReinspect,
-  commitDay,
   ensurePairR,
   mirrorDropGrey,
   mirrorGreyDraft,
@@ -86,6 +86,8 @@ export function EntryView() {
   const [addingLine, setAddingLine] = useState(false);
   const [lineDraft, setLineDraft] = useState("");
   const [siteOpen, setSiteOpen] = useState(false);
+  /** 저장 전 확인 화면 */
+  const [reviewOpen, setReviewOpen] = useState(false);
   const [newSite, setNewSite] = useState("");
   const [lineOpen, setLineOpen] = useState(false);
   const [daySheet, setDaySheet] = useState<DaySheet | null>(null);
@@ -497,6 +499,7 @@ export function EntryView() {
       {/* 날짜별 기록: 위 '검사 기록'(라인별)은 그대로 두고 그 아래에 더한다. 「수정」으로 저장된 기록을 고친다. */}
       {site && <DayHistory records={siteRecords} site={site} sites={sites} />}
 
+      <SaveReview open={reviewOpen} onClose={() => setReviewOpen(false)} />
       <div className="bottom-dock">
         {resettable === 0 && undoable ? (
           <button
@@ -524,7 +527,7 @@ export function EntryView() {
             초기화
           </button>
         )}
-        <button className="save-main" type="button" disabled={unsaved === 0} onClick={() => void commitDay((text) => window.confirm(text))}>
+        <button className="save-main" type="button" disabled={unsaved === 0} onClick={() => setReviewOpen(true)}>
           {unsaved > 0 ? `저장 · 미저장 ${unsaved}${unsavedAt.length > 1 || (unsavedAt[0] && unsavedAt[0] !== site) ? ` (${unsavedAt.length}현장)` : ""}` : "저장됨"}
         </button>
       </div>

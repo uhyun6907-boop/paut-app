@@ -646,3 +646,42 @@ button.mini strong { color: var(--text); font-size: 15px; font-weight: 800; }
 .day-editor .de-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .day-editor .de-add { justify-self: start; color: #d70015; }
 .reset-main.undo { color: #d70015; }
+
+/* 명세서 탭: 달별 작업·금액 */
+.bill-months { display: flex; gap: 6px; overflow-x: auto; padding: 0 0 10px; }
+.bill-months button { flex: none; min-height: 40px; padding: 0 14px; border-radius: 20px; border: 1px solid var(--border); background: #fff; font-weight: 800; font-size: 14px; color: var(--muted); }
+.bill-months button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.bill-total .bill-grand { font-size: 28px; font-weight: 900; margin: 2px 0 4px; }
+.bill-total .sub { color: var(--muted); font-size: 13px; font-weight: 700; }
+.bill-site summary { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; cursor: pointer; list-style: none; }
+.bill-site summary::-webkit-details-marker { display: none; }
+.bill-site .name { font-weight: 900; font-size: 16px; min-width: 0; overflow-wrap: anywhere; }
+.bill-site .amt { font-weight: 900; font-size: 16px; text-align: right; }
+.bill-site .meta { grid-column: 1 / -1; color: var(--muted); font-size: 12px; font-weight: 700; }
+.bill-lines { margin-top: 8px; border-top: 1px solid var(--border); }
+.bill-line { display: grid; grid-template-columns: auto auto 1fr auto; gap: 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px dashed var(--border); font-size: 13px; font-weight: 700; }
+.bill-line .d { color: var(--muted); }
+.bill-line .n { color: var(--muted); }
+.bill-line .a { text-align: right; }
+.bill-line.foot { grid-template-columns: auto 1fr auto 1fr; border-bottom: none; }
+
+/* 저장 전 확인 */
+.save-review { max-height: 85vh; }
+.save-review .sr-staff { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 8px; margin-bottom: 8px; }
+.save-review .sr-staff label { display: grid; gap: 2px; font-size: 12px; font-weight: 800; color: var(--muted); min-width: 0; }
+.save-review .sr-staff label:first-child { grid-column: 1 / -1; }
+.save-review .sr-staff .field-input { min-width: 0; width: 100%; box-sizing: border-box; }
+.save-review .sr-sum { font-weight: 800; margin: 4px 0 8px; }
+.save-review .sr-site { border: 1px solid var(--border); border-radius: 12px; padding: 8px; margin-bottom: 8px; }
+.save-review .sr-site-name { font-weight: 900; font-size: 15px; }
+.save-review .sr-line-name { font-size: 12px; font-weight: 800; color: var(--muted); margin: 6px 0 2px; overflow-wrap: anywhere; }
+.save-review .sr-pt { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; padding: 4px 0; }
+.save-review .sr-pt .p { font-weight: 900; }
+.save-review .sr-pt .p small { color: var(--muted); font-weight: 700; }
+.save-review .sr-pt.removed .p { text-decoration: line-through; color: var(--muted); }
+.save-review .sr-pt .gone { color: #d70015; font-size: 12px; font-weight: 800; grid-column: 2 / -1; }
+.save-review .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.save-review .seg button { min-height: 36px; padding: 0 10px; font-weight: 800; font-size: 13px; background: #fff; color: var(--muted); }
+.save-review .seg button.on.ok { background: #e9f9ee; color: #178a3a; }
+.save-review .seg button.on.bad { background: #fdeaea; color: #d70015; }
+.save-review .sr-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; position: sticky; bottom: 0; background: var(--surface); padding-top: 8px; }

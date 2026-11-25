@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { bindOnline, checkWorkDate, dismissToast, initSession, removeRecord, resetSamples, syncQueue, useSession } from "../store/session";
 import { headerStatus } from "../store/syncStatus";
 import { ExcelScreen } from "./ExcelScreen";
+import { BillScreen } from "./BillScreen";
 import { EntryView } from "./EntryView";
 import { IljiScreen } from "./IljiScreen";
 import { RefScreen } from "./RefScreen";
@@ -139,7 +140,7 @@ export function App() {
         {tab === "entry" && <EntryView />}
         {tab === "list" && <ListScreen />}
         {tab === "log" && <ExcelScreen part="log" />}
-        {tab === "bill" && <ExcelScreen part="bill" />}
+        {tab === "bill" && <BillScreen />}
         {tab === "ilji" && <IljiScreen />}
         {tab === "ref" && <RefScreen />}
         {tab === "settings" && (
