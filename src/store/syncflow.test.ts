@@ -615,6 +615,45 @@ describe("카드 길게 눌러 날짜 고치기", () => {
     expect(noAppMark("드림합정26.11")).toBe(true);
   });
 
+  it("입력 탭 날짜별 기록 수정: 라인·날짜·판정을 바꾸면 같은 행을 고치고, 현장을 바꾸면 옛 행은 비우고 새 현장 리스트에 새 행을 쓴다", async () => {
+    const today = [rec("S28", PASS), rec("R28", PASS), rec("S29", PASS), rec("S30", FAIL)];
+    seed([...realListRecords(), ...today]);
+    const s = await startApp();
+    expect(iljiDayRow("2026-11-12")).toMatchObject({ J: "350A", K: "3" });
+
+    // S29: 라인·날짜 바꾸기, S30: 불합격 → 합격
+    const n = await s.editSavedRecords([
+      { id: today[2].id, line: "HJ-M-006-250A", date: "2026-11-10" },
+      { id: today[3].id, result: PASS },
+    ], { date: "2026-11-10", staff: { insp1: "홍길동", insp2: "", timeStart: "08:00", timeEnd: "12:00" } });
+    expect(n).toBe(2);
+    await s.settled();
+    await s.syncIdle();
+    const st = s.getState();
+    const s29 = st.records.find((r) => r.id === today[2].id)!;
+    expect(s29).toMatchObject({ line: "HJ-M-006-250A", diameter: "250A", date: "2026-11-10", sync: "synced" });
+    const listed = parseListWorkbook(drive.files(LIST_ID)).flatMap((x) => x.records);
+    expect(listed.find((r) => r.id === today[2].id)).toMatchObject({ line: "HJ-M-006-250A", date: "2026-11-10" });
+    expect(listed.find((r) => r.id === today[3].id)?.result).toBe(PASS);
+    expect(iljiDayRow("2026-11-12")).toMatchObject({ J: "350A", K: "3" });
+    expect(iljiDayRow("2026-11-10")).toMatchObject({ J: "250A", K: "1", P: "홍길동" });
+
+    // S28: 현장 바꾸기(드림 합정주공 → 지성 군포 PA)
+    const rowsBefore = listed.length;
+    await s.editSavedRecords([{ id: today[0].id, site: "지성 군포 PA" }]);
+    await s.settled();
+    await s.syncIdle();
+    const after = s.getState();
+    expect(after.records.find((r) => r.id === today[0].id)).toBeUndefined();
+    const moved = after.records.find((r) => r.site === "지성 군포 PA" && r.point === "S28" && r.date === "2026-11-12")!;
+    expect(moved).toMatchObject({ line: "HJ-M-005-350A", result: PASS, sync: "synced" });
+    const pyeongtaek = parseListWorkbook(drive.files(LIST_ID)).flatMap((x) => x.records);
+    expect(pyeongtaek.some((r) => r.id === today[0].id && r.point)).toBe(false);
+    expect(pyeongtaek.length).toBeLessThanOrEqual(rowsBefore);
+    const gm = parseListWorkbook(drive.files(LIST_GM_ID)).flatMap((x) => x.records);
+    expect(gm.find((r) => r.id === moved.id)).toMatchObject({ point: "S28", line: "HJ-M-005-350A", date: "2026-11-12" });
+  });
+
   it("다른 달로 옮기면 그 달 기존 시트에 쓰고 옛 달에서는 지운다. 시트가 없으면 만들지 않고 주황 안내로 대기, 시트를 만들면 채운다", async () => {
     const today = [rec("S28", PASS), rec("R28", PASS), rec("S29", PASS)];
     seed([...realListRecords(), ...today]);
