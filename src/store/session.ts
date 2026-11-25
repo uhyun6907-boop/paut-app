@@ -652,8 +652,15 @@ export function isSaved(rec: InspectionRecord): boolean {
  * '저장 · 미저장 N' 의 N: 지금 현장(지난 날 카드 포함)에서 사용자가 고쳤지만 아직 저장하지 않은 기록(sync "local")만 센다.
  * 회색(미입력) 카드는 세지 않는다 — 날짜가 없는 자리 표시라 저장해도 엑셀에 쓰지 않고 지워지지도 않는다.
  */
-export function unsavedEdits(records: InspectionRecord[], meta: Pick<DayMeta, "lastSite">): number {
-  return records.filter((rec) => rec.sync === "local" && rec.site === meta.lastSite).length;
+/** 저장 안 한 기록 수. 모든 현장(현장을 바꿔도 앞 현장의 미저장은 남고, 저장 한 번에 같이 저장한다). */
+export function unsavedEdits(records: InspectionRecord[], _meta?: Pick<DayMeta, "lastSite">): number {
+  return records.filter((rec) => rec.sync === "local").length;
+}
+
+/** 저장 안 한 기록이 있는 현장(지금 현장 먼저). */
+export function unsavedSites(records: InspectionRecord[], current: string): string[] {
+  const sites = [...new Set(records.filter((rec) => rec.sync === "local").map((rec) => rec.site))];
+  return sites.sort((a, b) => (a === current ? -1 : b === current ? 1 : 0));
 }
 
 export function unsavedCount(): number {
@@ -673,7 +680,9 @@ export function commitDay(confirm: (text: string) => boolean = () => true): Prom
 
 async function commitDayNow(): Promise<void> {
   const { lastSite, workDate } = state.meta;
-  const toCommit = state.records.filter((rec) => rec.site === lastSite && (rec.date === workDate || rec.sync === "local"));
+  // 모든 현장의 미저장 + 지금 현장의 그날 기록(검사자·시간만 바뀐 경우 작업일지 다시 보내기용). 두 현장을 오가며 입력해도 저장 한 번.
+  const sites = [...new Set([lastSite, ...state.records.filter((rec) => rec.sync === "local").map((rec) => rec.site), ...changedDraftSites(state.meta)])];
+  const toCommit = state.records.filter((rec) => rec.sync === "local" || (sites.includes(rec.site) && rec.date === workDate));
   const metaDirty = staffChanged(state.meta);
   const locals = toCommit.filter((rec) => rec.sync === "local");
   if (!locals.length && !metaDirty && !toCommit.some((rec) => !rec.deleted && rec.result !== "없음")) {
@@ -707,14 +716,14 @@ async function commitDayNow(): Promise<void> {
         timeEnd: state.meta.timeEnd,
       },
     },
-    draftBaseline: baselineOf(state.meta, [lastSite]),
+    draftBaseline: baselineOf(state.meta, sites),
   };
   void persistMeta();
   state.records = state.records.filter((rec) => !(rec.deleted && neverSent(rec)));
-  const places = state.records.filter((rec) => !rec.deleted && rec.site === lastSite && rec.date === workDate && rec.result === PASS).length;
+  const places = state.records.filter((rec) => !rec.deleted && sites.includes(rec.site) && rec.date === workDate && rec.result === PASS).length;
   patch({ records: [...state.records] });
   await persistRecords();
-  toast(`저장됨 · ${places}개소`);
+  toast(sites.length > 1 ? `저장됨 · ${sites.length}개 현장 ${places}개소` : `저장됨 · ${places}개소`);
   requestSync();
 }
 

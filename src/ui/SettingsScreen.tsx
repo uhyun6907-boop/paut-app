@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { useDrill } from "./drill";
 import { ILJI_COLUMNS, LIST_GM_FILE, STATEMENT_AJ_FILE, type AppConfig, type SiteMapping } from "../domain/types";
-import { listChildren, searchDrive, type DriveItem } from "../sync/graph";
+import { hiddenInPicker, listChildren, searchDrive, type DriveItem } from "../sync/graph";
 import { accessToken, redirectUri, resolveClientId } from "../sync/msal";
 import { resetSamples, saveConfig, signIn, signOut, useOneDriveFile, useSession } from "../store/session";
 import type { BookKind } from "../excel/engine";
@@ -64,7 +64,7 @@ export function SettingsScreen() {
   /** 폴더 먼저, 그다음 엑셀(이름순). 같은 항목은 한 번만. */
   function arrange(list: DriveItem[]): DriveItem[] {
     const map = new Map<string, DriveItem>();
-    for (const item of list) if (item.folder || isXlsx(item)) map.set(item.id, item);
+    for (const item of list) if ((item.folder || isXlsx(item)) && !hiddenInPicker(item)) map.set(item.id, item);
     return [...map.values()].sort((a, b) => (a.folder ? 0 : 1) - (b.folder ? 0 : 1) || a.name.localeCompare(b.name, "ko"));
   }
 
@@ -88,7 +88,7 @@ export function SettingsScreen() {
       setItems(shown);
       if (path.length) return;
       const more = [
-        ...first.filter((item) => item.folder).slice(0, 40).map((folder) => listChildren(t, folder.id)),
+        ...first.filter((item) => item.folder && !hiddenInPicker(item)).slice(0, 40).map((folder) => listChildren(t, folder.id)),
         ...["거래명세", "작업일지", "비파괴", "xlsx"].map((q) => searchDrive(t, q)),
       ];
       await Promise.all(

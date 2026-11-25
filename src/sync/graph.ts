@@ -9,6 +9,8 @@ const GRAPH = "https://graph.microsoft.com/v1.0";
 export interface DriveItem {
   id: string;
   name: string;
+  /** 검색 결과에서 들어 있는 폴더 경로(예: /drive/root:/첨부 파일). */
+  parentReference?: { id?: string; path?: string };
   size?: number;
   folder?: object;
   file?: object;
@@ -100,6 +102,20 @@ function childrenUrl(parent: string): string {
   return `${base}/children?$top=200&$select=id,name,folder,file,size,lastModifiedDateTime`;
 }
 
+/** 파일 고르기에서 숨기는 OneDrive 기본 폴더(문서·첨부 파일 등). 그 안의 파일도 목록·검색에 보이지 않는다. */
+const HIDDEN_FOLDERS = ["문서", "documents", "첨부파일", "attachments", "사진", "pictures", "바탕화면", "desktop", "개인중요보관소", "personalvault", "음악", "music", "동영상", "videos"];
+
+function hiddenName(name: string): boolean {
+  return HIDDEN_FOLDERS.includes(name.normalize("NFC").replace(/\s+/g, "").toLowerCase());
+}
+
+/** 파일 고르기에 보이지 않을 항목: 숨김 폴더 자체, 또는 그 안(경로에 숨김 폴더가 있음)의 파일. */
+export function hiddenInPicker(item: DriveItem): boolean {
+  if (item.folder && hiddenName(item.name)) return true;
+  const path = decodeURIComponent(item.parentReference?.path ?? "").replace(/^\/drive(s\/[^/]+)?\/root:?/, "");
+  return path.split("/").some((part) => part && hiddenName(part));
+}
+
 /** 파일 고르기 화면의 요청 하나 시간 제한(ms). 한 폴더가 멈춰도 목록 전체가 오래 비어 있지 않게. */
 export const PICKER_TIMEOUT_MS = 20_000;
 
@@ -146,7 +162,7 @@ export function searchQueriesFor(name: string): string[] {
 
 export async function searchDrive(token: string, query: string, timeoutMs = PICKER_TIMEOUT_MS): Promise<DriveItem[]> {
   const q = query.replace(/'/g, "''");
-  const url = `${GRAPH}/me/drive/root/search(q='${encodeURIComponent(q)}')?$top=40&$select=id,name,folder,file,size`;
+  const url = `${GRAPH}/me/drive/root/search(q='${encodeURIComponent(q)}')?$top=40&$select=id,name,folder,file,size,parentReference`;
   const res = await graphFetch(url, token, {}, undefined, timeoutMs);
   if (!res.ok) throw new Error(await readError(res));
   const json = (await res.json()) as { value: DriveItem[] };

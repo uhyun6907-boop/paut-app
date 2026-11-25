@@ -208,3 +208,34 @@ describe("1번 탭 '미저장' 은 사용자가 고친 기록만", () => {
     expect(writes()).toEqual([]);
   });
 });
+
+describe("두 현장을 오가며 입력하고 저장 한 번", () => {
+  it("현장을 바꿔도 앞 현장의 미저장이 남고, 저장 한 번으로 두 현장을 같이 저장한다", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(2026, 10, 12, 10));
+    seed(realListRecords(), { workDate: "2026-11-12", lastSite: SITE, activeLine: LINE, prefix: "S" });
+    await startApp();
+    const s = await startApp();
+    await s.savePoint("합격", "S29");
+    await s.settled();
+    const first = s.unsavedEdits(s.getState().records);
+    expect(first).toBeGreaterThanOrEqual(1);
+
+    await s.selectSite("지성 군포 PA");
+    await s.updateMeta({ activeLine: "군포산본 이원화 750A-5" });
+    await s.savePoint("합격", "S40");
+    await s.settled();
+    let st = s.getState();
+    expect(s.unsavedEdits(st.records)).toBeGreaterThan(first);
+    expect(s.unsavedSites(st.records, "지성 군포 PA")).toEqual(["지성 군포 PA", SITE]);
+
+    await s.commitDay(() => true);
+    await s.settled();
+    st = s.getState();
+    expect(s.unsavedEdits(st.records)).toBe(0);
+    expect(st.records.filter((r) => r.date === "2026-11-12" && ["S29", "S40"].includes(r.point) && r.src === "user").map((r) => [r.site, r.sync !== "local"]).sort()).toEqual([
+      ["드림 합정주공", true],
+      ["지성 군포 PA", true],
+    ]);
+  });
+});
