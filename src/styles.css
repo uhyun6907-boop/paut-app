@@ -644,3 +644,4 @@ button.mini strong { color: var(--text); font-size: 15px; font-weight: 800; }
 .day-editor .de-pt.removed .field-input { text-decoration: line-through; opacity: .5; }
 .day-editor .btn.danger { color: #d70015; border-color: #d70015; }
 .day-editor .de-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.day-editor .de-add { justify-self: start; color: #d70015; }

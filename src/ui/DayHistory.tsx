@@ -41,6 +41,8 @@ interface PointDraft {
   point: string;
   result: string;
   remove: boolean;
+  /** 수정 화면에서 새로 더한 포인트(저장하면 새 기록). */
+  isNew?: boolean;
 }
 
 interface LineDraft {
@@ -90,6 +92,13 @@ function DayEditor({ date, site, recs, sites, onDone }: { date: string; site: st
       if (lineChanged) notes.push(`라인 ${l.line} → ${l.newLine.trim()}`);
       if (l.site !== site) notes.push(`${l.line} 현장 → ${l.site}`);
       for (const p of l.points) {
+        if (p.isNew) {
+          const point = p.point.trim().toUpperCase();
+          if (!point) continue;
+          edits.push({ id: p.id, add: { site: l.site, line: l.newLine.trim() || l.line, date: newDate, point, result: p.result } });
+          notes.push(`${point} ${p.result} 추가`);
+          continue;
+        }
         const rec = original.get(p.id);
         if (!rec) continue;
         if (p.remove) {
@@ -169,17 +178,28 @@ function DayEditor({ date, site, recs, sites, onDone }: { date: string; site: st
           </label>
           {l.points.map((p, j) => (
             <div key={p.id} className={`de-pt${p.remove ? " removed" : ""}`}>
-              <input className="field-input" value={p.point} aria-label="포인트" disabled={p.remove} onChange={(e) => setPoint(i, j, { point: e.target.value })} />
+              <input className="field-input" value={p.point} aria-label="포인트" placeholder={p.isNew ? "예: S05" : undefined} disabled={p.remove} onChange={(e) => setPoint(i, j, { point: e.target.value })} />
               <select className="field-input" value={p.result} aria-label="판정" disabled={p.remove} onChange={(e) => setPoint(i, j, { result: e.target.value })}>
                 <option value={PASS}>합격</option>
                 <option value={FAIL}>불합격</option>
                 {p.result !== PASS && p.result !== FAIL && <option value={p.result}>{p.result}</option>}
               </select>
-              <button type="button" className={`btn small${p.remove ? " danger" : ""}`} onClick={() => setPoint(i, j, { remove: !p.remove })}>
-                {p.remove ? "삭제 취소" : "삭제"}
-              </button>
+              {p.isNew ? (
+                <button type="button" className="btn small" onClick={() => setLine(i, { points: l.points.filter((_, m) => m !== j) })}>빼기</button>
+              ) : (
+                <button type="button" className={`btn small${p.remove ? " danger" : ""}`} onClick={() => setPoint(i, j, { remove: !p.remove })}>
+                  {p.remove ? "삭제 취소" : "삭제"}
+                </button>
+              )}
             </div>
           ))}
+          <button
+            type="button"
+            className="btn small de-add"
+            onClick={() => setLine(i, { points: [...l.points, { id: `new-${Date.now()}-${l.points.length}`, point: "", result: FAIL, remove: false, isNew: true }] })}
+          >
+            + 포인트 추가 (불합격)
+          </button>
         </div>
       ))}
       <div className="de-actions">

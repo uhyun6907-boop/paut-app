@@ -1754,6 +1754,8 @@ export interface SavedEdit {
   point?: string;
   result?: string;
   delete?: boolean;
+  /** 그날 그 라인에 새 포인트를 더한다(예: 빠뜨린 불합격). id 는 화면용이고 새 기록은 새 ID. */
+  add?: { site: string; line: string; date: string; point: string; result: string };
 }
 
 /**
@@ -1779,6 +1781,40 @@ export function editSavedRecords(edits: SavedEdit[], dayStaff?: { date: string; 
       };
     }
     for (const edit of edits) {
+      if (edit.add) {
+        const { site, line, date } = edit.add;
+        const parsed = parsePoint(edit.add.point.trim());
+        if (!parsed || !site || !line.trim() || !/^\d{4}-\d{2}-\d{2}$/.test(date) || isRemovedSite(site)) continue;
+        const rec: InspectionRecord = {
+          id: crypto.randomUUID(),
+          site,
+          sheetName: sheetNameFor(state.records, site) ?? site,
+          date,
+          line: line.trim(),
+          point: parsed.suffix ? parsed.raw : fmtPoint(parsed.prefix, parsed.num),
+          result: normalizeResult(edit.add.result),
+          diameter: diameterFromLine(line) ?? "",
+          material: materialFor(site, line.trim()),
+          sch: "",
+          reportNo: "",
+          reportDate: "",
+          defectNo: "",
+          drawingNo: "",
+          weldNo: "",
+          rtSheets: "",
+          flawType: "",
+          flawLen: "",
+          note: "",
+          issued: "",
+          src: "user",
+          sync: "pending",
+          ts: Date.now(),
+        };
+        queueLocal(rec);
+        state.records = [...state.records, rec];
+        changed += 1;
+        continue;
+      }
       const rec = state.records.find((r) => r.id === edit.id && !r.deleted);
       if (!rec) continue;
       const placeholder = rec.result === "없음";

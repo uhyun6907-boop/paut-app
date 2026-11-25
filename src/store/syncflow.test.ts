@@ -654,6 +654,23 @@ describe("카드 길게 눌러 날짜 고치기", () => {
     expect(gm.find((r) => r.id === moved.id)).toMatchObject({ point: "S28", line: "HJ-M-005-350A", date: "2026-11-12" });
   });
 
+  it("날짜별 기록 수정에서 빠뜨린 불합격을 더하면 리스트에 새 행(불합격)으로 쓰고, 작업일지·명세서 개소는 그대로", async () => {
+    const today = [rec("S28", PASS), rec("R28", PASS)];
+    seed([...realListRecords(), ...today]);
+    const s = await startApp();
+    expect(iljiDayRow("2026-11-12")).toMatchObject({ J: "350A", K: "2" });
+    const n = await s.editSavedRecords([{ id: "new-1", add: { site: "드림 합정주공", line: "HJ-M-005-350A", date: "2026-11-12", point: "s29", result: FAIL } }]);
+    expect(n).toBe(1);
+    await s.settled();
+    await s.syncIdle();
+    const added = s.getState().records.find((r) => r.point === "S29" && r.date === "2026-11-12" && r.src === "user")!;
+    expect(added).toMatchObject({ result: FAIL, diameter: "350A", sync: "synced" });
+    const listed = parseListWorkbook(drive.files(LIST_ID)).flatMap((x) => x.records);
+    expect(listed.find((r) => r.id === added.id)).toMatchObject({ point: "S29", result: FAIL, date: "2026-11-12" });
+    expect(iljiDayRow("2026-11-12")).toMatchObject({ J: "350A", K: "2" });
+    expect(stmtRows("드림합정26.11")).toContain("2026-11-12|350A|2");
+  });
+
   it("다른 달로 옮기면 그 달 기존 시트에 쓰고 옛 달에서는 지운다. 시트가 없으면 만들지 않고 주황 안내로 대기, 시트를 만들면 채운다", async () => {
     const today = [rec("S28", PASS), rec("R28", PASS), rec("S29", PASS)];
     seed([...realListRecords(), ...today]);
