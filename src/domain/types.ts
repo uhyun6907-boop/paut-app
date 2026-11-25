@@ -123,8 +123,19 @@ export interface SiteBundle {
   records: InspectionRecord[];
 }
 
+/** 마지막 「저장」이 바꾼 것. 「방금 저장 되돌리기」가 이 모습으로 되돌린다. */
+export interface LastCommit {
+  at: number;
+  /** added: 이번 저장으로 처음 들어간 기록 · changed: 고친 기록(before = 저장 전 모습) · deleted: 지운 기록(before = 지우기 전) */
+  items: { id: string; kind: "added" | "changed" | "deleted"; before?: SavedRecord }[];
+  /** 이번 저장 전 그날 검사자·시간(없었으면 null) */
+  dayStaff?: { date: string; prev: DayStaff | null };
+}
+
 export interface DayMeta {
   workDate: string;
+  /** 마지막 저장(되돌리기용). 되돌리거나 다음 저장을 하면 바뀐다. */
+  lastCommit?: LastCommit;
   /** 작업 날짜를 마지막으로 오늘과 맞춰 본 날. 이 날이 지나기 전에는 작업 날짜를 저절로 바꾸지 않는다. */
   workDateCheckedOn?: string;
   dayType: "평일" | "공휴일";

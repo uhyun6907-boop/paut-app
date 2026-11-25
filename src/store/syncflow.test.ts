@@ -434,6 +434,64 @@ describe("11/11 HJ-M-005-350A S28 이 리스트에 안 들어간 문제", () => 
   });
 });
 
+describe("방금 저장 되돌리기", () => {
+  it("새로 저장한 카드는 지우고(리스트 내용 비움·작업일지 개소 원래대로), 원래 있던 카드는 그대로, 다시 하면 아무것도 안 한다", async () => {
+    onDay(2026, 11, 12);
+    const s28 = rec("S28", PASS);
+    seed([...realListRecords(), s28], { workDate: "2026-11-12", lastSite: "드림 합정주공", activeLine: "HJ-M-005-350A", prefix: "S" });
+    const s = await startApp();
+    expect(iljiDayRow("2026-11-12")).toMatchObject({ J: "350A", K: "1" });
+    expect(s.canUndoCommit(s.getState().records, s.getState().meta)).toBe(false);
+
+    // 새 카드 S29·S30 합격 저장
+    await s.savePoint(PASS, "S29");
+    await s.savePoint(PASS, "S30");
+    await s.settled();
+    await s.commitDay();
+    await s.syncIdle();
+    const s29 = s.getState().records.find((r) => r.point === "S29" && r.date === "2026-11-12" && !r.deleted)!;
+    expect(listIds()).toContain(s29.id);
+    // S→R 자동이 켜져 있으면 R29·R30 도 같이 저장된다: 개소가 늘었다.
+    const added = s.getState().records.filter((r) => r.date === "2026-11-12" && !r.deleted && r.result === PASS && r.id !== s28.id && r.src === "user").length;
+    expect(added).toBeGreaterThanOrEqual(2);
+    expect(iljiDayRow("2026-11-12")).toMatchObject({ K: String(1 + added) });
+    expect(s.canUndoCommit(s.getState().records, s.getState().meta)).toBe(true);
+    expect(s.undoCommitText(s.getState().meta)).toContain("새로 넣은");
+
+    expect(await s.undoLastCommit()).toBeGreaterThanOrEqual(2);
+    await s.settled();
+    await s.syncIdle();
+    const st = s.getState();
+    expect(st.records.find((r) => r.id === s29.id && !r.deleted)).toBeUndefined();
+    expect(listIds()).not.toContain(s29.id);
+    expect(st.records.find((r) => r.id === s28.id)).toMatchObject({ result: PASS, sync: "synced" });
+    const listed = parseListWorkbook(drive.files(LIST_ID)).flatMap((x) => x.records);
+    expect(listed.find((r) => r.id === s28.id)?.result).toBe(PASS);
+    expect(iljiDayRow("2026-11-12")).toMatchObject({ J: "350A", K: "1" });
+    expect(s.canUndoCommit(st.records, st.meta)).toBe(false);
+    expect(await s.undoLastCommit()).toBe(0);
+  });
+
+  it("검사자·시간만 바꾼 저장도 되돌리면 작업일지 그날 검사자가 원래대로", async () => {
+    onDay(2026, 11, 12);
+    seed([...realListRecords(), rec("S28", PASS, { sync: "local" })], { workDate: "2026-11-12" });
+    const s = await startApp();
+    await s.commitDay();
+    await s.syncIdle();
+    const before = iljiDayRow("2026-11-12")!;
+    await s.updateMeta({ insp2: "김정환" });
+    await s.commitDay();
+    await s.syncIdle();
+    expect(iljiDayRow("2026-11-12")).toMatchObject({ Q: "김정환" });
+    expect(s.undoCommitText(s.getState().meta)).toContain("검사자·시간 원래대로");
+    await s.undoLastCommit();
+    await s.settled();
+    await s.syncIdle();
+    expect(iljiDayRow("2026-11-12")).toMatchObject({ Q: before.Q });
+    expect(s.getState().meta.insp2).toBe(before.Q);
+  });
+});
+
 describe("거래명세서 그 달 시트가 없을 때(앱은 시트를 만들지 않음)", () => {
   it("리스트·작업일지는 반영, 명세서는 시트를 만들어 달라는 요청과 함께 대기. 사용자가 시트를 만든 뒤 다시 켜면 채운다", async () => {
     drive = realDrive({ novSheet: false });

@@ -47,6 +47,9 @@ import {
   setLineDrafts,
   unsavedEdits,
   unsavedSites,
+  canUndoCommit,
+  undoCommitText,
+  undoLastCommit,
   setResult,
   updateMeta,
   useSession,
@@ -169,6 +172,8 @@ export function EntryView() {
   const unsavedAt = useMemo(() => unsavedSites(records, site), [records, site]);
   // 초기화: 마지막 저장 뒤 바꾼 카드 표시가 있을 때만 켠다.
   const resettable = useMemo(() => resettableCount(records, meta), [records, meta]);
+  /** 방금 저장을 되돌릴 수 있는가(저장 뒤 아직 아무것도 고치지 않았을 때). */
+  const undoable = useMemo(() => canUndoCommit(records, meta), [records, meta]);
   const historyRows = useMemo(() => historyOfLine(lineRecords, historySort, "up"), [lineRecords, historySort]);
   const defects = useMemo(() => defectStats(siteRecords), [siteRecords]);
   const recent = useMemo(() => linesByLatestDate(siteRecords), [siteRecords]);
@@ -493,18 +498,32 @@ export function EntryView() {
       {site && <DayHistory records={siteRecords} site={site} sites={sites} />}
 
       <div className="bottom-dock">
-        <button
-          className="reset-main"
-          type="button"
-          disabled={resettable === 0}
-          onClick={() => {
-            if (!window.confirm(RESET_CONFIRM)) return;
-            cancelPaint();
-            void resetUnsaved();
-          }}
-        >
-          초기화
-        </button>
+        {resettable === 0 && undoable ? (
+          <button
+            className="reset-main undo"
+            type="button"
+            onClick={() => {
+              if (!window.confirm(undoCommitText(meta))) return;
+              cancelPaint();
+              void undoLastCommit();
+            }}
+          >
+            저장 취소
+          </button>
+        ) : (
+          <button
+            className="reset-main"
+            type="button"
+            disabled={resettable === 0}
+            onClick={() => {
+              if (!window.confirm(RESET_CONFIRM)) return;
+              cancelPaint();
+              void resetUnsaved();
+            }}
+          >
+            초기화
+          </button>
+        )}
         <button className="save-main" type="button" disabled={unsaved === 0} onClick={() => void commitDay((text) => window.confirm(text))}>
           {unsaved > 0 ? `저장 · 미저장 ${unsaved}${unsavedAt.length > 1 || (unsavedAt[0] && unsavedAt[0] !== site) ? ` (${unsavedAt.length}현장)` : ""}` : "저장됨"}
         </button>

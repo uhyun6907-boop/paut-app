@@ -5,7 +5,7 @@ import { canonicalPoint, fmtPoint, mirrorPoint, parsePoint } from "../domain/poi
 import { excelRowPatch, normalizeResult, type LiveTable } from "../excel/liveList";
 import { diameterFromLine } from "../domain/size";
 import { monthDay, todayISO } from "../domain/dates";
-import type { AppConfig, DayMeta, DayStaff, DraftCard, DriveFile, FileSteps, InspectionRecord, ListBookKind, ResultKind, SiteMapping, SyncFile, SyncReport } from "../domain/types";
+import type { AppConfig, DayMeta, DayStaff, DraftCard, LastCommit, DriveFile, FileSteps, InspectionRecord, ListBookKind, ResultKind, SiteMapping, SyncFile, SyncReport } from "../domain/types";
 import { FAIL, PASS, SYNC_FILES, SYNC_FILE_LABEL } from "../domain/types";
 import {
   bootstrapFromSamples,
@@ -689,6 +689,16 @@ async function commitDayNow(): Promise<void> {
     toast("저장할 내용이 없습니다");
     return;
   }
+  // 「방금 저장 되돌리기」용: 이번 저장이 무엇을 바꾸는지 기억한다(저장 전 모습).
+  const undoItems: LastCommit["items"] = [];
+  for (const rec of toCommit) {
+    if (rec.result === "없음" || rec.sync !== "local") continue;
+    if (rec.deleted) {
+      if (!neverSent(rec) && rec.lastSaved) undoItems.push({ id: rec.id, kind: "deleted", before: structuredClone(rec.lastSaved) });
+    } else if (rec.lastSaved) undoItems.push({ id: rec.id, kind: "changed", before: structuredClone(rec.lastSaved) });
+    else if (!wasSent(rec)) undoItems.push({ id: rec.id, kind: "added" });
+  }
+  const prevStaff = state.meta.dayStaff?.[workDate] ?? null;
   for (const rec of toCommit) {
     if (rec.result === "없음") {
       rec.sync = "synced";
@@ -717,6 +727,7 @@ async function commitDayNow(): Promise<void> {
       },
     },
     draftBaseline: baselineOf(state.meta, sites),
+    lastCommit: { at: Date.now(), items: undoItems, dayStaff: metaDirty ? { date: workDate, prev: structuredClone(prevStaff) } : undefined },
   };
   void persistMeta();
   state.records = state.records.filter((rec) => !(rec.deleted && neverSent(rec)));
@@ -1880,6 +1891,98 @@ export function editSavedRecords(edits: SavedEdit[], dayStaff?: { date: string; 
     await persistMeta();
     requestSync();
     return changed;
+  });
+}
+
+/** 저장 뒤 되돌릴 수 있는 시간(ms). */
+export const UNDO_COMMIT_MS = 60 * 60 * 1000;
+
+/** 「방금 저장 되돌리기」를 보일지: 마지막 저장이 되돌릴 것을 남겼고, 그 뒤 저장 안 한 편집이 없을 때. */
+export function canUndoCommit(records: InspectionRecord[], meta: DayMeta): boolean {
+  const last = meta.lastCommit;
+  if (!last || (!last.items.length && !last.dayStaff)) return false;
+  // 오래된 저장을 실수로 되돌리지 않게: 저장 뒤 1시간까지만.
+  if (Date.now() - last.at > UNDO_COMMIT_MS) return false;
+  return !records.some((r) => r.sync === "local");
+}
+
+/** 되돌리기 확인 문구: 무엇을 되돌리는지. */
+export function undoCommitText(meta: DayMeta): string {
+  const last = meta.lastCommit;
+  if (!last) return "";
+  const added = last.items.filter((i) => i.kind === "added").length;
+  const changed = last.items.filter((i) => i.kind === "changed").length;
+  const deleted = last.items.filter((i) => i.kind === "deleted").length;
+  const parts = [added ? `새로 넣은 ${added}개 지움` : "", changed ? `고친 ${changed}개 원래대로` : "", deleted ? `지운 ${deleted}개 되살림` : "", last.dayStaff ? "검사자·시간 원래대로" : ""].filter(Boolean);
+  return `방금 저장을 되돌릴까요? ${parts.join(", ")}. 엑셀에도 바로 반영합니다.`;
+}
+
+/**
+ * 「방금 저장 되돌리기」: 마지막 저장 전 모습으로 기록을 돌려놓고 바로 엑셀에 보낸다.
+ * - 새로 넣은 기록: 지운다(엑셀은 행과 순번을 남기고 내용만 비움 — 「삭제」와 같음).
+ * - 고친 기록: 저장 전 값으로(날짜를 바꿨으면 옛 날짜 작업일지·명세서도 다시 계산).
+ * - 지운 기록: 되살려 다시 쓴다.
+ * - 검사자·시간: 저장 전 그날 값으로.
+ * 돌려준 값: 되돌린 기록 수.
+ */
+export function undoLastCommit(): Promise<number> {
+  return enqueue(async () => {
+    const last = state.meta.lastCommit;
+    if (!last || !canUndoCommit(state.records, state.meta)) return 0;
+    let n = 0;
+    for (const item of last.items) {
+      let rec = state.records.find((r) => r.id === item.id);
+      if (!rec && item.kind === "deleted" && item.before) {
+        // 지움을 이미 다 보내 이 기기에서 치워진 기록: 저장 전 모습으로 다시 만든다(같은 ID — 엑셀에 다시 쓴다).
+        rec = { ...structuredClone(item.before), deleted: false };
+        state.records = [...state.records, rec];
+      }
+      if (!rec) continue;
+      if (item.kind === "added") {
+        if (rec.deleted) continue;
+        markDeleted(rec);
+        queueLocal(rec);
+        dropReinspectOf(rec.id);
+      } else if (item.before) {
+        const before = item.before;
+        if (before.date !== rec.date) redate(rec, before.date);
+        Object.assign(rec, {
+          site: before.site,
+          sheetName: before.sheetName,
+          line: before.line,
+          point: before.point,
+          result: before.result,
+          diameter: before.diameter,
+          material: before.material,
+          deleted: before.deleted,
+        });
+        queueLocal(rec);
+      }
+      rec.syncNote = undefined;
+      n += 1;
+    }
+    let dayStaff = state.meta.dayStaff;
+    let staffBack: Partial<DayMeta> = {};
+    if (last.dayStaff) {
+      const { date, prev } = last.dayStaff;
+      dayStaff = { ...(dayStaff ?? {}) };
+      if (prev) dayStaff[date] = prev;
+      else delete dayStaff[date];
+      if (prev && date === state.meta.workDate) staffBack = { dayType: prev.dayType, insp1: prev.insp1, insp2: prev.insp2, timeStart: prev.timeStart, timeEnd: prev.timeEnd };
+      // 그날 기록이 작업일지를 다시 쓰게 한다(검사자·시간만 바뀐 저장이었으면).
+      for (const rec of state.records) {
+        if (rec.date !== date || rec.deleted || rec.result === "없음" || rec.sync === "pending") continue;
+        rec.sync = "pending";
+        if (rec.steps) rec.steps = { ...rec.steps, ilji: undefined };
+      }
+    }
+    state.meta = { ...state.meta, ...staffBack, dayStaff, lastCommit: undefined };
+    patch({ records: [...state.records], meta: state.meta });
+    await persistRecords();
+    await persistMeta();
+    toast(`저장 되돌림 · ${n}개`);
+    requestSync();
+    return n;
   });
 }
 
