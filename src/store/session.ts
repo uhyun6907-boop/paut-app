@@ -936,13 +936,21 @@ function applyOutcome(pending: InspectionRecord[], outcome: GraphSyncOutcome): v
 
 let initOnce: Promise<void> | null = null;
 
-/** 아전 군포 기록의 명세서 '건너뜀' 표시를 지운다. 바꿨으면 true. */
+/**
+ * 아전 군포 기록의 명세서 '건너뜀'·'실패' 표시를 지운다(예전 판이 남긴 것: 건너뜀, 01 파일을 못 찾음 실패).
+ * 다음 동기화가 다시 정한다(지금은 01 파일 전용 입력 전까지 '대기'). 명세서 실패만 있던 기록은 실패에서 대기로. 바꿨으면 true.
+ */
 export function reopenAjeonStatement(records: InspectionRecord[]): boolean {
   let changed = false;
   for (const rec of records) {
     if (rec.site.replace(/\s+/g, "").replace(/PA$/i, "") !== "아전군포") continue;
-    if (rec.steps?.statement?.status !== "skip") continue;
+    const st = rec.steps?.statement?.status;
+    if (st !== "skip" && st !== "error") continue;
     rec.steps = { ...rec.steps, statement: undefined };
+    if (rec.sync === "error" && !SYNC_FILES.some((f) => rec.steps?.[f]?.status === "error")) {
+      rec.sync = "pending";
+      rec.syncError = undefined;
+    }
     changed = true;
   }
   return changed;

@@ -27,6 +27,7 @@ import {
   bootstrapFromSamples,
   fetchWorkbook,
   exportBook,
+  AJEON_WAIT_TEXT,
   fileOf,
   restoreStatementOwnership,
   syncGraph,
@@ -261,8 +262,8 @@ describe("Graph 동기화: 네 번째 파일(군포·마전 리스트)", () => {
     expect(mjStep?.list?.status).toBe("done");
     expect(mjStep?.ilji?.status).toBe("done");
     expect(mjStep?.statement).toMatchObject({ status: "wait", message: "11월 거래명세서 시트를 만들어주세요 (지성 마전 26.11)" });
-    // 아전 군포: 명세서는 01(아전·승재) 파일의 아전군포26.11 시트에.
-    expect(out.steps.get(jobs[7].id)?.statement).toMatchObject({ status: "done" });
+    // 아전 군포: 01(아전·승재) 파일은 .xls·다른 양식이라 쓰지 않고 대기(실패 아님).
+    expect(out.steps.get(jobs[7].id)?.statement).toMatchObject({ status: "wait", message: AJEON_WAIT_TEXT });
     expect(out.report.files.statement.status).not.toBe("error");
   });
 

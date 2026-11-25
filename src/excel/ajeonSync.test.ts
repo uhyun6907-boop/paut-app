@@ -1,15 +1,18 @@
-/** 아전 군포 거래명세서는 01(아전·승재) 파일의 아전 시트에 쓴다. 접두어·단가는 그 파일에서 읽는다. 가짜 OneDrive 로만 확인한다. */
+/**
+ * 아전 군포 거래명세서. 실제 OneDrive 확인(2026-11-25): '01_PAUT 거래명세서 (아전, 승재).xls' — .xls(옛 형식)라 Graph 로 칸을 쓸 수 없고,
+ * 아전 군포 시트 양식도 02 와 다르다(일자·품명·관경·수량(개소)·단가(개소당 183,600)·금액). 그래서 01 전용 입력을 만들기 전까지
+ * 01 파일에는 아무것도 쓰지 않고 '대기'로 둔다. 다른 현장은 그대로 02 파일에 쓴다. 가짜 OneDrive 로만 확인한다.
+ */
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { InspectionRecord } from "../domain/types";
 import { PASS } from "../domain/types";
 import { GraphClient, graphRetry } from "../sync/graph";
 import { syncPanelModel } from "../store/syncStatus";
 import { FakeDrive } from "../test/fakeGraph";
-import { STMT_AJ_ID, STMT_ID, graphConfig, meta, realDrive, rec } from "../test/realBooks";
-import { detectAjStatement, restoreStatementOwnership, statementBookOf, syncGraph } from "./engine";
+import { STMT_ID, graphConfig, meta, realDrive, rec } from "../test/realBooks";
+import { AJEON_WAIT_TEXT, restoreStatementOwnership, statementBookOf, syncGraph } from "./engine";
 import { readPautRows } from "./statementBook";
-import { userCreatesMonthSheet } from "../test/userSheet";
-import { unzipXlsx } from "./ooxml";
+import { workbookSheets } from "./ooxml";
 
 beforeAll(() => {
   graphRetry.baseMs = 0;
@@ -25,7 +28,7 @@ const aj = (point: string, partial: Partial<InspectionRecord> = {}) =>
   rec(point, PASS, { site: "아전 군포 PA", sheetName: "아전 군포 PA", line: "AJ-750A", diameter: "750A", date: "2026-11-03", steps: { list: { status: "done" }, ilji: { status: "done" } }, ...partial });
 
 describe("아전 군포 거래명세서", () => {
-  it("아전 군포는 01 파일, 다른 현장은 02 파일(예전 설정에 statementBook 이 없어도)", () => {
+  it("아전 군포는 01 파일 몫, 다른 현장은 02 파일(예전 설정에 statementBook 이 없어도)", () => {
     const old = graphConfig();
     old.mappings = old.mappings.map((m) => ({ ...m, statementBook: undefined }));
     expect(statementBookOf(old, "아전 군포 PA")).toBe("statementAj");
@@ -33,87 +36,52 @@ describe("아전 군포 거래명세서", () => {
     expect(statementBookOf(old, "지성 군포 PA")).toBe("statement");
   });
 
-  it("01 파일의 최근 아전 시트에서 시트 이름 앞부분과 단가를 읽는다", () => {
+  it("아전 군포 기록은 어느 명세서 파일에도 쓰지 않고 '대기'(실패 아님). 같은 동기화의 합정주공은 02 파일에 쓴다", async () => {
     const d = realDrive();
-    expect(detectAjStatement(d.files(STMT_AJ_ID))).toEqual({ prefix: "아전군포", unitPrice: 75000 });
-  });
-
-  it("아전 군포 기록은 01 파일(이름으로 찾음)의 그 달 아전 시트에 쓰고, 02 파일에는 쓰지 않는다", async () => {
-    const d = realDrive();
-    // 사용자가 PC 엑셀에서 12월 아전 시트를 만들어 둔 상태.
-    const dec = userCreatesMonthSheet(d.files(STMT_AJ_ID), "아전군포", 2026, 12);
-    const jobs = [aj("S1", { date: "2026-12-03" }), aj("S2", { date: "2026-12-03" }), aj("S3", { date: "2026-12-05" })];
+    const hj = rec("S28", PASS);
+    const jobs = [aj("S1"), aj("S2", { date: "2026-11-05" }), hj];
+    const snapshot = () =>
+      Object.fromEntries(workbookSheets(d.files(STMT_ID)).map(({ name }) => [name, JSON.stringify(readPautRows(d.files(STMT_ID), name))]));
+    const before = snapshot();
     const out = await syncGraph({ client: client(d), jobs, all: jobs, config: graphConfig(), meta: meta(), sleep: async () => undefined });
-    for (const r of jobs) expect(out.steps.get(r.id)?.statement).toMatchObject({ status: "done" });
-    const rows = readPautRows(d.files(STMT_AJ_ID), dec).map((r) => `${r.date}|${r.diameter}|${r.count}`);
-    expect(dec).toBe("아전군포 2612");
-    expect(rows).toEqual(["2026-12-03|750A|2", "2026-12-05|750A|1"]);
-    expect(d.requests((e) => e.item === STMT_ID && e.method !== "GET")).toHaveLength(0);
-    expect(out.report.files.statement.status).toBe("ok");
+    for (const r of jobs.slice(0, 2)) expect(out.steps.get(r.id)?.statement).toEqual(expect.objectContaining({ status: "wait", message: AJEON_WAIT_TEXT }));
+    expect(out.steps.get(hj.id)?.statement?.status).toBe("done");
+    expect(readPautRows(d.files(STMT_ID), "드림합정26.11").map((r) => `${r.date}|${r.diameter}|${r.count}`)).toContain("2026-11-12|350A|1");
+    // 02 파일은 합정주공 11월 시트만 바뀌었고(아전 줄 없음), 01 파일은 찾지도 열지도 않는다.
+    const after = snapshot();
+    expect(Object.keys(after).filter((name) => after[name] !== before[name])).toEqual(["드림합정26.11"]);
+    expect(readPautRows(d.files(STMT_ID), "드림합정26.11").some((r) => r.date === "2026-11-03" || r.date === "2026-11-05")).toBe(false);
+    expect(d.requests((e) => e.path.includes("/search(") || e.path.includes("root:/"))).toHaveLength(0);
+    expect(out.report.files.statement.status).not.toBe("error");
   });
 
-  it("검색이 안 되고 이름이 조금 달라도(띄어쓰기) 02 파일과 같은 폴더의 01 파일을 찾아 쓰고, 찾은 파일을 기억한다", async () => {
-    const d = realDrive();
-    const dec = userCreatesMonthSheet(d.files(STMT_AJ_ID), "아전군포", 2026, 12);
-    const folder = "00_PAUT 거래명세서";
-    d.items.get(STMT_ID)!.folder = folder;
-    const ajItem = d.items.get(STMT_AJ_ID)!;
-    ajItem.folder = folder;
-    ajItem.name = "01_PAUT 거래명세서(아전,승재).xlsx";
-    d.searchMisses = () => true;
-    const jobs = [aj("S1", { date: "2026-12-03" })];
-    const out = await syncGraph({ client: client(d), jobs, all: jobs, config: graphConfig(), meta: meta(), sleep: async () => undefined });
-    expect(out.steps.get(jobs[0].id)?.statement).toMatchObject({ status: "done" });
-    expect(readPautRows(d.files(STMT_AJ_ID), dec).map((r) => `${r.date}|${r.count}`)).toEqual(["2026-12-03|1"]);
-    expect(out.files.get("statementAj")).toEqual({ id: STMT_AJ_ID, name: "01_PAUT 거래명세서(아전,승재).xlsx" });
-  });
-
-  it("그 달 아전 시트가 없으면 만들지 않고 대기, 01 파일에 아전 시트가 아예 없으면 안내하고 대기", async () => {
-    const d = realDrive();
-    const jobs = [aj("S1", { date: "2026-12-03" })];
-    const out = await syncGraph({ client: client(d), jobs, all: jobs, config: graphConfig(), meta: meta(), sleep: async () => undefined });
-    expect(out.steps.get(jobs[0].id)?.statement).toMatchObject({ status: "wait", message: "12월 거래명세서 시트를 만들어주세요 (아전군포 2612)" });
-
-    const none = realDrive({ ajeon: false });
-    const plain = unzipXlsx(none.bytes(STMT_ID));
-    none.put(STMT_AJ_ID, "01_PAUT 거래명세서 (아전, 승재).xlsx", none.bytes(STMT_ID));
-    expect(detectAjStatement(plain)).toBeNull();
-    const out2 = await syncGraph({ client: client(none), jobs: [aj("S9")], all: [aj("S9")], config: graphConfig(), meta: meta(), sleep: async () => undefined });
-    expect([...out2.steps.values()][0]?.statement).toMatchObject({ status: "wait" });
-    expect([...out2.steps.values()][0]?.statement?.message).toContain("아전 시트");
-    expect(none.requests((e) => e.method !== "GET" && (e.item === STMT_AJ_ID || e.item === STMT_ID))).toHaveLength(0);
-  });
-
-  it("동기화 상태 화면의 거래명세서는 한 줄이다", () => {
-    const r = aj("S1");
-    r.sync = "pending";
+  it("동기화 창: 거래명세서는 한 줄, 빨간 실패가 아니라 주황 대기로 이유를 보인다", () => {
+    const r = aj("S1", { sync: "pending", steps: { list: { status: "done" }, ilji: { status: "done" }, statement: { status: "wait", message: AJEON_WAIT_TEXT } } });
     const model = syncPanelModel([r], null, { online: true, syncing: false, mode: "graph" });
-    expect(model.lines.filter((l) => l.file === "statement")).toHaveLength(1);
+    const lines = model.lines.filter((l) => l.file === "statement");
+    expect(lines).toHaveLength(1);
+    expect(lines[0].state).toBe("waiting");
+    expect(lines[0].text).toContain(AJEON_WAIT_TEXT);
+    expect(model.tone).not.toBe("bad");
   });
 });
 
-describe("예전 판이 건너뛴 아전 군포 명세서", () => {
-  it("앱을 켜면 아전 군포 기록의 명세서 '건너뜀' 표시만 지운다(다른 현장·다른 단계는 그대로)", async () => {
+describe("예전 판이 남긴 아전 군포 명세서 표시", () => {
+  it("앱을 켜면 '건너뜀'·'실패(01 파일 못 찾음)'를 지우고, 명세서 실패만 있던 기록은 실패에서 대기로", async () => {
     const { reopenAjeonStatement } = await import("../store/session");
-    const a = aj("S1", { steps: { list: { status: "done" }, ilji: { status: "done" }, statement: { status: "skip", message: "접두어" } } });
-    const other = rec("S2", PASS, { steps: { statement: { status: "skip" } } });
-    expect(reopenAjeonStatement([a, other])).toBe(true);
-    expect(a.steps).toMatchObject({ list: { status: "done" }, ilji: { status: "done" } });
-    expect(a.steps?.statement).toBeUndefined();
+    const skipped = aj("S1", { sync: "synced", steps: { list: { status: "done" }, ilji: { status: "done" }, statement: { status: "skip", message: "접두어" } } });
+    const failed = aj("S2", {
+      sync: "error",
+      syncError: "거래명세서: OneDrive 에서 「01_PAUT 거래명세서 (아전, 승재).xlsx」 파일을 찾지 못했어요.",
+      steps: { list: { status: "done" }, ilji: { status: "done" }, statement: { status: "error", message: "못 찾음" } },
+    });
+    const other = rec("S3", PASS, { steps: { statement: { status: "skip" } } });
+    expect(reopenAjeonStatement([skipped, failed, other])).toBe(true);
+    expect(skipped.steps?.statement).toBeUndefined();
+    expect(failed).toMatchObject({ sync: "pending", syncError: undefined });
+    expect(failed.steps?.statement).toBeUndefined();
+    expect(failed.steps?.list?.status).toBe("done");
     expect(other.steps?.statement?.status).toBe("skip");
-    expect(reopenAjeonStatement([a, other])).toBe(false);
-  });
-});
-
-describe("01 파일이 .xlsx 가 아니면", () => {
-  it("02 옆에 '01_PAUT 거래명세서 (아전, 승재).xls' 만 있으면 형식 때문에 못 쓴다고 알려 주고 아무것도 쓰지 않는다", async () => {
-    const d = realDrive({ ajeon: false });
-    d.items.get(STMT_ID)!.folder = "00_PAUT 거래명세서";
-    d.put("AJ-XLS", "01_PAUT 거래명세서 (아전, 승재).xls", d.bytes(STMT_ID), { folder: "00_PAUT 거래명세서" });
-    d.searchMisses = () => true;
-    const jobs = [aj("S1", { date: "2026-12-03" })];
-    const out = await syncGraph({ client: client(d), jobs, all: jobs, config: graphConfig(), meta: meta(), sleep: async () => undefined });
-    expect(out.steps.get(jobs[0].id)?.statement?.message).toContain("xls 형식이라 앱이 쓸 수 없어요");
-    expect(d.requests((e) => e.method !== "GET" && e.item === "AJ-XLS")).toHaveLength(0);
+    expect(reopenAjeonStatement([skipped, failed, other])).toBe(false);
   });
 });
