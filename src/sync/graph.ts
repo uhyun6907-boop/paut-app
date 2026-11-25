@@ -441,6 +441,20 @@ export class GraphClient {
     return (text ? JSON.parse(text) : {}) as T;
   }
 
+  /**
+   * itemId 파일과 같은 폴더에서 name 파일을 찾는다(검색 색인과 상관없음). 이름은 띄어쓰기·대소문자를 무시하고 비교한다.
+   * 그래도 없으면 같은 폴더에서 like(이름) 가 참인 xlsx 가 하나뿐일 때 그것. 못 찾으면 null.
+   */
+  async findSibling(itemId: string, name: string, like?: (name: string) => boolean): Promise<DriveItem | null> {
+    const meta = await this.json<{ parentReference?: { id?: string } }>(`${GRAPH}/me/drive/items/${encodeURIComponent(itemId)}?$select=id,name,parentReference`);
+    const kids = (await this.children(meta.parentReference?.id || "root")).filter((item) => !item.folder);
+    const key = (n: string) => n.normalize("NFC").replace(/\s+/g, "").toLowerCase();
+    const exact = kids.find((item) => key(item.name) === key(name));
+    if (exact) return exact;
+    const loose = like ? kids.filter((item) => item.name.toLowerCase().endsWith(".xlsx") && like(item.name.normalize("NFC"))) : [];
+    return loose.length === 1 ? loose[0] : null;
+  }
+
   async itemMeta(itemId: string): Promise<{ id: string; name: string; eTag?: string }> {
     return this.json(`${GRAPH}/me/drive/items/${encodeURIComponent(itemId)}?$select=id,name,eTag`);
   }

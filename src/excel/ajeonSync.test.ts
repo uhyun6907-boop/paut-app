@@ -52,6 +52,22 @@ describe("아전 군포 거래명세서", () => {
     expect(out.report.files.statement.status).toBe("ok");
   });
 
+  it("검색이 안 되고 이름이 조금 달라도(띄어쓰기) 02 파일과 같은 폴더의 01 파일을 찾아 쓰고, 찾은 파일을 기억한다", async () => {
+    const d = realDrive();
+    const dec = userCreatesMonthSheet(d.files(STMT_AJ_ID), "아전군포", 2026, 12);
+    const folder = "00_PAUT 거래명세서";
+    d.items.get(STMT_ID)!.folder = folder;
+    const ajItem = d.items.get(STMT_AJ_ID)!;
+    ajItem.folder = folder;
+    ajItem.name = "01_PAUT 거래명세서(아전,승재).xlsx";
+    d.searchMisses = () => true;
+    const jobs = [aj("S1", { date: "2026-12-03" })];
+    const out = await syncGraph({ client: client(d), jobs, all: jobs, config: graphConfig(), meta: meta(), sleep: async () => undefined });
+    expect(out.steps.get(jobs[0].id)?.statement).toMatchObject({ status: "done" });
+    expect(readPautRows(d.files(STMT_AJ_ID), dec).map((r) => `${r.date}|${r.count}`)).toEqual(["2026-12-03|1"]);
+    expect(out.files.get("statementAj")).toEqual({ id: STMT_AJ_ID, name: "01_PAUT 거래명세서(아전,승재).xlsx" });
+  });
+
   it("그 달 아전 시트가 없으면 만들지 않고 대기, 01 파일에 아전 시트가 아예 없으면 안내하고 대기", async () => {
     const d = realDrive();
     const jobs = [aj("S1", { date: "2026-12-03" })];

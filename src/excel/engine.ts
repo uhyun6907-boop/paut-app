@@ -1027,10 +1027,22 @@ async function statementStepFor(
     return;
   }
   try {
-    const got = await fetchWorkbook(client, file!);
+    let target = file!;
+    if (book === "statementAj" && !target.id) {
+      // 아직 ID 를 모르는 01 파일: 02(지성·드림) 파일과 같은 폴더에서 먼저 찾는다(검색 색인과 상관없음).
+      const sibling = run.file("statement");
+      if (sibling?.id) {
+        await client.refreshToken();
+        const near = await client
+          .findSibling(sibling.id, target.name, (n) => n.replace(/\s+/g, "").includes("아전") && n.includes("거래명세"))
+          .catch(() => null);
+        if (near) target = { id: near.id, name: near.name };
+      }
+    }
+    const got = await fetchWorkbook(client, target);
     run.found(book, got.file);
     const itemId = got.file.id;
-    moveOwnership(owned, file!.id, itemId);
+    moveOwnership(owned, target.id || itemId, itemId);
     const before = unzipXlsx(got.value);
     if (book === "statementAj") {
       const sites = [...new Set([...groups.values(), ...verify.values()].map((g) => g.site))];

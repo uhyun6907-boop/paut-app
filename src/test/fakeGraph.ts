@@ -300,7 +300,7 @@ export class FakeDrive {
     const rest = path.slice(path.indexOf(itemId) + itemId.length);
 
     if (rest.startsWith("?") || rest === "") {
-      return json({ id: itemId, name: item.name, eTag: etag(itemId, item.version) });
+      return json({ id: itemId, name: item.name, eTag: etag(itemId, item.version), parentReference: item.folder ? { id: `folder:${item.folder}` } : {} });
     }
     if (rest === "/content") {
       if (method === "GET") return new Response(Uint8Array.from(zipXlsx(item.files)), { status: 200 });
