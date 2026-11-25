@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { useDrill } from "./drill";
-import { ILJI_COLUMNS, LIST_GM_FILE, STATEMENT_AJ_FILE, type AppConfig, type SiteMapping } from "../domain/types";
-import { hiddenInPicker, listChildren, searchDrive, type DriveItem } from "../sync/graph";
+import { ILJI_COLUMNS, LIST_GM_FILE, STATEMENT_AJ_FILE, type AppConfig, type DriveFile, type SiteMapping } from "../domain/types";
+import { hiddenInPicker, listChildren, searchDrive, siblingsOf, type DriveItem } from "../sync/graph";
 import { accessToken, redirectUri, resolveClientId } from "../sync/msal";
 import { resetSamples, saveConfig, signIn, signOut, useOneDriveFile, useSession } from "../store/session";
 import type { BookKind } from "../excel/engine";
@@ -61,10 +61,13 @@ export function SettingsScreen() {
     return !item.folder && item.name.toLowerCase().endsWith(".xlsx");
   }
 
+  /** 이미 고른 파일과 같은 폴더에서 찾은 엑셀. 숨김 폴더 안에 있어도 보인다. */
+  const nearIds = useRef(new Set<string>());
+
   /** 폴더 먼저, 그다음 엑셀(이름순). 같은 항목은 한 번만. */
   function arrange(list: DriveItem[]): DriveItem[] {
     const map = new Map<string, DriveItem>();
-    for (const item of list) if ((item.folder || isXlsx(item)) && !hiddenInPicker(item)) map.set(item.id, item);
+    for (const item of list) if ((item.folder || isXlsx(item)) && (nearIds.current.has(item.id) || !hiddenInPicker(item))) map.set(item.id, item);
     return [...map.values()].sort((a, b) => (a.folder ? 0 : 1) - (b.folder ? 0 : 1) || a.name.localeCompare(b.name, "ko"));
   }
 
@@ -87,7 +90,18 @@ export function SettingsScreen() {
       let shown = arrange(first);
       setItems(shown);
       if (path.length) return;
+      // 이미 고른 파일(리스트·작업일지·거래명세서)과 같은 폴더: 01 아전 명세서처럼 02 옆에 있는 파일이 검색에 안 잡혀도 보이게.
+      const files = Object.values(session.config.files) as (DriveFile | null | undefined)[];
+      const chosen = [...new Set(files.flatMap((f) => (f?.id ? [f.id] : [])))];
+      const near = chosen.map((id) =>
+        siblingsOf(t, id).then((list) => {
+          const xlsx = list.filter(isXlsx);
+          for (const item of xlsx) nearIds.current.add(item.id);
+          return xlsx;
+        }),
+      );
       const more = [
+        ...near,
         ...first.filter((item) => item.folder && !hiddenInPicker(item)).slice(0, 40).map((folder) => listChildren(t, folder.id)),
         ...["거래명세", "작업일지", "비파괴", "xlsx"].map((q) => searchDrive(t, q)),
       ];

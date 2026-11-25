@@ -119,6 +119,14 @@ export function hiddenInPicker(item: DriveItem): boolean {
 /** 파일 고르기 화면의 요청 하나 시간 제한(ms). 한 폴더가 멈춰도 목록 전체가 오래 비어 있지 않게. */
 export const PICKER_TIMEOUT_MS = 20_000;
 
+/** 이미 고른 파일과 같은 폴더의 항목(그 파일이 어디에 있든 — 검색·숨김 규칙과 상관없이). */
+export async function siblingsOf(token: string, itemId: string, timeoutMs = PICKER_TIMEOUT_MS): Promise<DriveItem[]> {
+  const res = await graphFetch(`${GRAPH}/me/drive/items/${encodeURIComponent(itemId)}?$select=id,parentReference`, token, {}, undefined, timeoutMs);
+  if (!res.ok) throw new Error(await readError(res));
+  const meta = (await res.json()) as { parentReference?: { id?: string } };
+  return listChildren(token, meta.parentReference?.id || "root", timeoutMs);
+}
+
 export async function listChildren(token: string, parentId: string | "root", timeoutMs = PICKER_TIMEOUT_MS): Promise<DriveItem[]> {
   const res = await graphFetch(childrenUrl(parentId), token, {}, undefined, timeoutMs);
   if (!res.ok) throw new Error(await readError(res));
