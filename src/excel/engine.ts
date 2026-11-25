@@ -9,7 +9,7 @@ import { dropCalcChain, moveRowCells, readSheet, setXml, shiftRowNumbers, unzipX
 import { expectedMonthSheetName, readLengths, readPautRows, writePautLines, type PautLine, type SheetOwnership } from "./statementBook";
 import { diffSheet, toRangeWrites } from "./cellDiff";
 import { GraphError, listRowFormulas, type GraphCell, type GraphClient, type WorkbookSession } from "../sync/graph";
-import { excelRowPatch } from "./liveList";
+import { duplicateRowsText, excelRowPatch } from "./liveList";
 import { copyRowFormat } from "../sync/rowFormat";
 
 /** 이 기기에 사본을 두는 통합 문서. 검사리스트는 두 파일(평택 list, 군포·마전 listGm). */
@@ -660,6 +660,17 @@ async function listBookStep(
       });
       for (const id of byId.keys()) check.present.add(id);
       await alignWithList(wb, ws.id, alignBySheet.get(sheetName) ?? [], rowsById, check);
+      // 같은 앱 ID 가 두 줄 이상(엑셀에서 앱 행을 Y 째로 복사함): 어느 줄이 맞는지 모르므로 그 기록은 쓰지 않고
+      // 어느 행들인지 알려 준다(한쪽을 지우면 다음 동기화 때 이어서 보냄). 한 줄만 고치면 두 줄이 서로 달라진다.
+      const dups = [...rowsById].filter(([, r]) => r.length > 1).map(([id, rows]) => ({ id, rows }));
+      const dupIds = new Set(dups.map((d) => d.id));
+      if (dups.length) {
+        const stuck = group.filter((r) => dupIds.has(r.id));
+        if (stuck.length) run.mark(stuck, "list", "wait", duplicateRowsText(sheetName, dups));
+        for (const r of stuck) remaining.delete(r);
+        for (let i = group.length - 1; i >= 0; i--) if (dupIds.has(group[i].id)) group.splice(i, 1);
+        for (const id of dupIds) byId.delete(id);
+      }
       const plain = new Map<string, number[]>();
       colF.forEach((row, i) => {
         const y = colY[i]?.[0];
@@ -674,7 +685,7 @@ async function listBookStep(
       };
       // 보낸 것으로 표시됐는데 Y열에 앱 ID 가 없는 기록(예: 11/11 S28) → 새 행으로 다시 쓴다.
       for (const rec of verifyBySheet.get(sheetName) ?? []) {
-        if (byId.has(rec.id)) continue;
+        if (byId.has(rec.id) || dupIds.has(rec.id)) continue;
         // 군포·마전: 리스트 단계만 다시 한다(작업일지·명세서에 이미 반영된 것은 그대로 — 두 번 세지 않음).
         if (book === "listGm") rec.steps = rec.steps ? { ...rec.steps, list: undefined } : undefined;
         else rec.steps = undefined;

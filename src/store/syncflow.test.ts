@@ -7,7 +7,7 @@ import type { InspectionRecord, SyncReport } from "../domain/types";
 import { FAIL, PASS } from "../domain/types";
 import { parseListWorkbook } from "../excel/listBook";
 import { readPautRows, readStatement } from "../excel/statementBook";
-import { readSheet } from "../excel/ooxml";
+import { readSheet, setCell, setXml } from "../excel/ooxml";
 import type { FakeDrive } from "../test/fakeGraph";
 import { ILJI_ID, LIST_GM_ID, LIST_GM_NAME, LIST_ID, STMT_ID, fixture, graphConfig, meta, realDrive, realGmRecords, realListRecords, rec } from "../test/realBooks";
 import { userCreatesMonthSheet } from "../test/userSheet";
@@ -431,6 +431,44 @@ describe("11/11 HJ-M-005-350A S28 이 리스트에 안 들어간 문제", () => 
     const s28 = s.getState().records.find((r) => r.point === "S28" && r.date === "2026-11-11" && !r.deleted);
     expect(s28?.sync).toBe("synced");
     expect(listIds()).toContain(s28!.id);
+  });
+});
+
+describe("엑셀에서 앱 행을 Y(앱 ID) 째로 복사해 같은 기록이 두 줄", () => {
+  it("그 기록은 어느 줄에도 쓰지 않고 '대기' + 두 행 번호를 알려 준다. 한 줄을 지우면 다음 동기화 때 남은 줄을 고친다", async () => {
+    onDay(2026, 11, 12);
+    const s28 = rec("S28", PASS);
+    seed([...realListRecords(), s28], { workDate: "2026-11-12" });
+    const s = await startApp();
+    const sheet = workbookSheets(drive.files(LIST_ID)).find((x) => x.name.trim() === "드림 합정주공")!;
+    const original = s.getState().records.find((r) => r.id === s28.id)!.excelRow!;
+    // 사용자가 엑셀에서 그 행을 아래 빈 줄로 복사(Y 앱 ID 포함)
+    const copyRow = original + 40;
+    let xml = readSheet(drive.files(LIST_ID), sheet.name).xml;
+    xml = setCell(xml, `F${copyRow}`, { kind: "inline", text: "HJ-M-005-350A" });
+    xml = setCell(xml, `G${copyRow}`, { kind: "inline", text: "S28" });
+    xml = setCell(xml, `Y${copyRow}`, { kind: "inline", text: s28.id });
+    setXml(drive.files(LIST_ID), sheet.path, xml);
+
+    // 앱에서 S28 을 불합격으로 고쳐 다시 보낸다
+    await s.editSavedRecords([{ id: s28.id, result: FAIL }]);
+    await s.settled();
+    await s.syncIdle();
+    const st = s.getState().records.find((r) => r.id === s28.id)!;
+    expect(st.steps?.list?.status).toBe("wait");
+    expect(st.steps?.list?.message).toContain(`${original}행=${copyRow}행`);
+    const resultAt = (row: number) => [...readSheet(drive.files(LIST_ID), sheet.name).cells.values()].find((c) => c.col === "P" && c.row === row)?.v ?? "";
+    expect(resultAt(original)).toBe(PASS);
+
+    // 사용자가 복사한 줄을 지움 → 다음 동기화 때 원래 줄을 고친다
+    xml = readSheet(drive.files(LIST_ID), sheet.name).xml;
+    for (const col of ["F", "G", "Y"]) xml = setCell(xml, `${col}${copyRow}`, { kind: "empty" });
+    setXml(drive.files(LIST_ID), sheet.path, xml);
+    s.retrySync();
+    await s.settled();
+    await s.syncIdle();
+    expect(s.getState().records.find((r) => r.id === s28.id)?.steps?.list?.status).toBe("done");
+    expect(resultAt(original)).toBe(FAIL);
   });
 });
 

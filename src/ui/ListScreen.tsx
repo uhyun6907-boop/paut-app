@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isRemovedSite } from "../domain/mapping";
 import { LIST_BOOK_LABEL } from "../domain/types";
-import { cellText, isDateCol, isEditable, liveTarget, loadLiveList, matchRecord, recordPatch, writeLiveCell, writeLiveCells, LiveConflictError, type LiveCell, type LiveCellsResult, type LiveRow, type LiveTable } from "../excel/liveList";
+import { cellText, duplicateAppRows, duplicateRowsText, isDateCol, isEditable, liveTarget, loadLiveList, matchRecord, recordPatch, writeLiveCell, writeLiveCells, LiveConflictError, type LiveCell, type LiveCellsResult, type LiveRow, type LiveTable } from "../excel/liveList";
 import { LiveMoveRefused, moveLiveRow, moveOrder, restoreLiveRows, type MoveSnapshot } from "../excel/liveMove";
 import { fileOf } from "../excel/engine";
 import { CACHE_STALE_TEXT, REFRESHING_TEXT, openList, saveListCache, savedAtText, type CacheSlot, type ListView } from "./listLoad";
@@ -475,6 +475,8 @@ export function ListScreen() {
   }, [session.config.mappings, session.records]);
   const [site, setSite] = useState(sites.includes(session.meta.lastSite) ? session.meta.lastSite : sites[0] ?? "");
   const [view, setView] = useState<ListView>({ status: "loading" });
+  /** 같은 앱 ID(Y)가 두 줄 이상(엑셀에서 앱 행을 Y 째로 복사함) — 앱과 엑셀이 어긋나는 원인이라 위에 알린다. */
+  const duplicates = useMemo(() => (view.status === "ok" ? duplicateAppRows(view.table.rows) : []), [view]);
   const [edit, setEdit] = useState<CellEdit | null>(null);
   const [undo, setUndo] = useState<MoveSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
@@ -775,6 +777,7 @@ export function ListScreen() {
             {LIST_BOOK_LABEL[target.book]} · 시트 「{target.sheetName}」 · OneDrive 에서 바로 읽음. 날짜를 눌러 펼치고 「수정」을 눌러야 고칠 수 있고, 고친 칸만 엑셀에 씁니다(시트·행은 만들지 않음).
           </p>
         )}
+        {view.status === "ok" && duplicates.length > 0 && <div className="warn">{duplicateRowsText(view.table.sheetName, duplicates)}</div>}
         <button className="btn block" type="button" disabled={view.status === "loading" || busy || (view.status === "ok" && view.refreshing)} onClick={() => void load(view.status === "ok")}>
           {view.status === "loading" ? "읽는 중…" : view.status === "ok" && view.refreshing ? REFRESHING_TEXT : "새로 불러오기"}
         </button>

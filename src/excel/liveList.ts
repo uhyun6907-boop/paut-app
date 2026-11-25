@@ -410,3 +410,20 @@ export function recordPatch(col: string, value: GraphCell): Partial<InspectionRe
   }
   return { [field]: text } as Partial<InspectionRecord>;
 }
+
+/** 같은 앱 ID(Y)가 두 줄 이상에 있는 경우(엑셀에서 앱 행을 Y 째로 복사함). 엑셀 행 번호 목록. */
+export function duplicateAppRows(rows: { row: number; cells: { col: string; value: unknown }[] }[]): { id: string; rows: number[] }[] {
+  const byId = new Map<string, number[]>();
+  for (const row of rows) {
+    const id = String(row.cells.find((c) => c.col === "Y")?.value ?? "").trim();
+    if (id) byId.set(id, [...(byId.get(id) ?? []), row.row]);
+  }
+  return [...byId].filter(([, r]) => r.length > 1).map(([id, r]) => ({ id, rows: r }));
+}
+
+/** 화면·동기화 안내: "6행=129행, 7행=130행 … 같은 앱 기록이 두 줄 — 한 줄을 지우세요". */
+export function duplicateRowsText(sheetName: string, dups: { rows: number[] }[]): string {
+  const pairs = dups.slice(0, 4).map((d) => d.rows.map((r) => `${r}행`).join("="));
+  const more = dups.length > 4 ? ` 외 ${dups.length - 4}개` : "";
+  return `「${sheetName}」 같은 앱 기록이 두 줄에 있어요(Y열 앱 ID까지 복사됨): ${pairs.join(", ")}${more}. 한쪽 줄을 지우면 앱과 다시 맞습니다.`;
+}
