@@ -650,6 +650,15 @@ async function listBookStep(
         if (v !== null && v !== undefined && String(v).trim() !== "") last = 6 + i;
       });
       const lastBefore = last;
+      // 읽기 검증: 이 기기가 이 시트에 이미 있다고 아는 행(엑셀에서 읽어 온 행·보낸 앱 행)이 있는데
+      // F(라인)·Y(앱 ID)가 통째로 비어 읽혔으면 잘못 읽은 것이다(빈 시트로 보고 6행부터 덮어쓴 사고). 쓰지 않고 멈춘다.
+      const knownRows = sheetMates(args.all, book, sheetName).filter((r) => !r.deleted && (r.src === "xlsx" || (r.excelRow ?? 0) > 0)).length;
+      const filledF = colF.filter((row) => row?.[0] !== null && row?.[0] !== undefined && String(row[0]).trim() !== "").length;
+      const filledY = colY.filter((row) => typeof row?.[0] === "string" && row[0].trim() !== "").length;
+      const appRowsKnown = sheetMates(args.all, book, sheetName).filter((r) => r.src === "user" && !r.deleted && (r.excelRow ?? 0) > 0).length;
+      if ((knownRows >= 3 && filledF === 0) || (appRowsKnown >= 3 && filledY === 0)) {
+        throw new GraphError(502, `「${sheetName}」 시트를 비어 있는 것처럼 읽어서 쓰지 않았습니다(덮어쓰기 방지). 잠시 뒤 다시 시도하세요.`, "empty-read");
+      }
       const byId = new Map<string, number>();
       const rowsById = new Map<string, number[]>();
       colY.forEach((row, i) => {
@@ -735,6 +744,17 @@ async function listBookStep(
         rec.excelRow = target;
         mirrorListLocally(rec, target, appended);
       };
+      // 덮어쓰기 방지: 새로 붙일 행들이 정말 비어 있는지 엑셀에서 다시 읽어 확인한다(라인·포인트·합부·앱 ID 중 하나라도 있으면 쓰지 않음).
+      const appendCount = ordered.filter((rec) => !(moves.get(rec.id)?.row ?? known(rec)) && !rec.deleted).length;
+      if (appendCount > 0) {
+        const from = last + 1;
+        const to = last + appendCount;
+        const block = await wb.readValues(ws.id, `A${from}:Y${to}`);
+        const busyRow = block.findIndex((cells) => [5, 6, 15, 24].some((i) => cells?.[i] !== null && cells?.[i] !== undefined && String(cells[i]).trim() !== ""));
+        if (busyRow >= 0) {
+          throw new GraphError(409, `「${sheetName}」 ${from + busyRow}행이 비어 있지 않아 새 줄을 쓰지 않았습니다(덮어쓰기 방지). 리스트 탭에서 확인하세요.`, "append-target-busy");
+        }
+      }
       for (const rec of mates) await writeAt(rec, moves.get(rec.id)!.row, true);
       for (const rec of mates) byId.set(rec.id, moves.get(rec.id)!.row);
       for (const rec of ordered) {

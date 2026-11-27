@@ -731,7 +731,9 @@ export class WorkbookSession {
       {},
       { sessionId: this.id },
     );
-    return json.values || [];
+    // 값이 없는 응답을 '빈 칸'으로 보면 안 된다(빈 시트로 착각해 위쪽 행을 덮어쓴 적이 있음). 읽기 실패로 멈춘다.
+    if (!Array.isArray(json.values)) throw new GraphError(502, `엑셀 범위(${address})를 읽지 못했습니다. 잠시 뒤 다시 시도하세요.`, "no-values");
+    return json.values;
   }
 
   /** 범위의 값·R1C1 수식(행을 옮겨도 같은 뜻)·값 종류. */

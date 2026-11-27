@@ -472,6 +472,55 @@ describe("엑셀에서 앱 행을 Y(앱 ID) 째로 복사해 같은 기록이 �
   });
 });
 
+describe("덮어쓰기 방지(실제 사고: 지성 군포 PA 6~18행을 앱 기록 13줄이 덮어씀)", () => {
+  async function setup() {
+    onDay(2026, 11, 12);
+    const today = [rec("S28", PASS), rec("R28", PASS), rec("S29", PASS)];
+    seed([...realListRecords(), ...today], { workDate: "2026-11-12" });
+    const s = await startApp();
+    expect(s.getState().records.filter((r) => today.some((t) => t.id === r.id)).every((r) => r.sync === "synced")).toBe(true);
+    const sheet = workbookSheets(drive.files(LIST_ID)).find((x) => x.name.trim() === "드림 합정주공")!;
+    const snapshot = () => readSheet(drive.files(LIST_ID), sheet.name).xml;
+    return { s, today, snapshot };
+  }
+
+  it("F·Y 열이 통째로 빈 값으로 읽히면(엑셀을 빈 시트로 착각) 아무 행도 쓰지 않고 멈춘다", async () => {
+    const { today, snapshot } = await setup();
+    const before = snapshot();
+    drive.blankReads = (address) => (/^[FY]6:/.test(address) ? "empty" : null);
+    drive.log = [];
+    // 다시 켜면 백필이 보낸 기록을 확인한다 — 예전 판은 여기서 '없어졌다'고 보고 6행부터 다시 썼다.
+    const s = await startApp();
+    expect(drive.requests((e) => e.method === "PATCH" && e.item === LIST_ID)).toHaveLength(0);
+    expect(snapshot()).toBe(before);
+    expect(s.getState().syncReport?.files.list.message ?? "").toContain("덮어쓰기 방지");
+    expect(s.getState().records.filter((r) => today.some((t) => t.id === r.id)).every((r) => !r.deleted)).toBe(true);
+  });
+
+  it("values 가 없는 응답은 빈 칸이 아니라 읽기 실패로 본다", async () => {
+    const { snapshot } = await setup();
+    const before = snapshot();
+    drive.blankReads = (address) => (/^Y6:/.test(address) ? "none" : null);
+    drive.log = [];
+    const s = await startApp();
+    expect(drive.requests((e) => e.method === "PATCH" && e.item === LIST_ID)).toHaveLength(0);
+    expect(snapshot()).toBe(before);
+    expect(s.getState().syncReport?.files.list.status).toBe("error");
+  });
+
+  it("붙일 자리(마지막 행 아래)가 비어 있지 않으면 새 줄을 쓰지 않는다", async () => {
+    const { s, snapshot } = await setup();
+    // F 열만 빈 값으로 읽혀 마지막 행을 5로 착각해도, 6행부터 실제로 차 있으면 쓰지 않는다.
+    const before = snapshot();
+    drive.blankReads = (address) => (/^F6:/.test(address) ? "empty" : null);
+    await s.savePoint(PASS, "S30");
+    await s.commitDay();
+    await s.syncIdle();
+    expect(snapshot()).toBe(before);
+    expect(drive.requests((e) => e.method === "PATCH" && e.item === LIST_ID && /A6:Y6|A7:Y7/.test(e.path))).toHaveLength(0);
+  });
+});
+
 describe("방금 저장 되돌리기", () => {
   it("새로 저장한 카드는 지우고(리스트 내용 비움·작업일지 개소 원래대로), 원래 있던 카드는 그대로, 다시 하면 아무것도 안 한다", async () => {
     onDay(2026, 11, 12);

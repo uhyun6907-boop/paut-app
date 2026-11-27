@@ -66,6 +66,8 @@ export class FakeDrive {
   validToken = "token-1";
   /** 순서 확인용 사건 목록(토큰 받기·요청). */
   events: string[] = [];
+  /** 이 주소 읽기를 빈 값("empty") 또는 values 없는 응답("none")으로 돌려준다. 그 밖은 정상. */
+  blankReads: (address: string) => "empty" | "none" | null = () => null;
   /** 이 검색어에는 아무것도 돌려주지 않는다(실제 OneDrive 가 괄호·쉼표가 든 전체 이름 검색에 빈 결과를 주는 것 흉내). */
   searchMisses: (query: string) => boolean = () => false;
   private sessionNo = 0;
@@ -408,6 +410,10 @@ export class FakeDrive {
       }
       const box = parseAddress(range[2]);
       if (method === "GET") {
+        // 실제 사고 흉내: 이 범위 읽기가 빈 값(또는 values 없는 응답)으로 온다.
+        const blank = this.blankReads(range[2]);
+        if (blank === "none") return json({ address: range[2] });
+        if (blank === "empty") return json({ address: range[2], values: Array.from({ length: box.r2 - box.r1 + 1 }, () => Array.from({ length: box.c2 - box.c1 + 1 }, () => "")) });
         const cells = this.cells(item.files, sheet.path);
         if ((box.r2 - box.r1 + 1) * (box.c2 - box.c1 + 1) > FakeDrive.maxCells) return err(504, "GatewayTimeout: response payload too large");
         const values: (string | number)[][] = [];
