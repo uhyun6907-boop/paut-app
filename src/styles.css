@@ -689,3 +689,5 @@ button.mini strong { color: var(--text); font-size: 15px; font-weight: 800; }
 /* 새 라인 제안 */
 .line-ideas { margin: 6px 0; }
 .line-ideas .k { font-size: 12px; font-weight: 800; color: var(--muted); margin: 6px 0 4px; }
+.relay-box { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+.relay-box .v { font-weight: 800; margin: 2px 0 8px; }

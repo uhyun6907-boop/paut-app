@@ -3,6 +3,7 @@ import { useDrill } from "./drill";
 import { ILJI_COLUMNS, LIST_GM_FILE, STATEMENT_AJ_FILE, type AppConfig, type DriveFile, type SiteMapping } from "../domain/types";
 import { hiddenInPicker, listChildren, searchDrive, siblingsOf, type DriveItem } from "../sync/graph";
 import { accessToken, redirectUri, resolveClientId } from "../sync/msal";
+import { backendEnabled, backendLogin, chooseRelay } from "../sync/backend";
 import { resetSamples, saveConfig, signIn, signOut, useOneDriveFile, useSession } from "../store/session";
 import type { BookKind } from "../excel/engine";
 import { settingsAuthModel } from "../store/syncStatus";
@@ -186,7 +187,40 @@ export function SettingsScreen() {
             <button className="btn block" type="button" onClick={() => void signIn({ switchAccount: true })}>다른 계정</button>
           </>
         )}
-        <p className="nav-hint">한 번 로그인하면 이 기기에 기억됩니다. Microsoft 정책상 앱(SPA)의 갱신 토큰은 24시간마다 끝나므로, 하루 넘게 쓰지 않은 뒤에는 화면 위에 '로그인 필요'가 뜰 수 있습니다. 누르면 보통 비밀번호 없이 바로 돌아오고, 대기 기록은 그때 자동으로 보냅니다.</p>
+        <div className="relay-box">
+          <div className="k">로그인 방식</div>
+          {backendEnabled() ? (
+            <>
+              <div className="v">중계 서버 로그인 (매일 다시 로그인하지 않음)</div>
+              <button
+                className="btn block"
+                type="button"
+                onClick={() => {
+                  if (!window.confirm("휴대폰 로그인(예전 방식)으로 되돌릴까요? 아이폰에서는 하루에도 여러 번 다시 로그인이 뜰 수 있어요.")) return;
+                  chooseRelay(false);
+                  window.location.reload();
+                }}
+              >
+                예전 방식으로 되돌리기
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="v">휴대폰 로그인 — 아이폰에서는 하루에도 여러 번 다시 로그인이 뜰 수 있어요</div>
+              <button
+                className="btn primary block"
+                type="button"
+                onClick={() => {
+                  if (!window.confirm("중계 서버 로그인으로 바꿀까요? Microsoft 로그인 화면이 한 번 뜨고, 그 뒤로는 매일 다시 로그인하지 않아요. 안 되면 여기서 예전 방식으로 되돌릴 수 있어요.")) return;
+                  chooseRelay(true);
+                  backendLogin(auth.email);
+                }}
+              >
+                중계 서버 로그인으로 바꾸기 (권장)
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       <div className="card">

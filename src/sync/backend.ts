@@ -13,9 +13,25 @@ import { TimeoutError, TOKEN_TIMEOUT_TEXT } from "./timeout";
 const DEVICE_KEY = "paut-device-token";
 const EMAIL_KEY = "paut-device-email";
 const STATE_KEY = "paut-login-state";
+/** 이 기기에서 고른 로그인 방식: 중계 서버 주소, 또는 "off"(휴대폰 로그인). 없으면 빌드 값. */
+const RELAY_KEY = "paut-api-url";
+
+/** 배포된 로그인 중계 서버(Cloudflare Worker paut-api). */
+export const DEFAULT_RELAY_URL = "https://paut-api.uhyun6907.workers.dev";
 
 export function backendUrl(): string {
-  return (import.meta.env.VITE_PAUT_API ?? "").trim().replace(/\/+$/, "");
+  const chosen = read(RELAY_KEY);
+  if (chosen === "off") return "";
+  return (chosen || import.meta.env.VITE_PAUT_API || "").trim().replace(/\/+$/, "");
+}
+
+/**
+ * 로그인 방식 바꾸기(이 기기만). on: 중계 서버 — 서버가 Microsoft 로그인을 보관해 매일 다시 로그인하지 않는다.
+ * off: 휴대폰 로그인(MSAL) — 아이폰에서는 하루에도 여러 번 다시 로그인이 뜰 수 있다.
+ */
+export function chooseRelay(on: boolean): void {
+  write(RELAY_KEY, on ? DEFAULT_RELAY_URL : "off");
+  cached = null;
 }
 
 export function backendEnabled(): boolean {
