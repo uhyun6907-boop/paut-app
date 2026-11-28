@@ -685,3 +685,7 @@ button.mini strong { color: var(--text); font-size: 15px; font-weight: 800; }
 .save-review .seg button.on.ok { background: #e9f9ee; color: #178a3a; }
 .save-review .seg button.on.bad { background: #fdeaea; color: #d70015; }
 .save-review .sr-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; position: sticky; bottom: 0; background: var(--surface); padding-top: 8px; }
+
+/* 새 라인 제안 */
+.line-ideas { margin: 6px 0; }
+.line-ideas .k { font-size: 12px; font-weight: 800; color: var(--muted); margin: 6px 0 4px; }

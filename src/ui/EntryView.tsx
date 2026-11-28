@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { buildBill, recordsForMonth } from "../domain/billing";
 import { DayHistory } from "./DayHistory";
+import { suggestNextLines } from "../domain/lineName";
 import { SaveReview } from "./SaveReview";
 import { sizeFromLine } from "../domain/size";
 import { PAUT_OD } from "../domain/reference";
@@ -180,6 +181,8 @@ export function EntryView() {
   const defects = useMemo(() => defectStats(siteRecords), [siteRecords]);
   const recent = useMemo(() => linesByLatestDate(siteRecords), [siteRecords]);
   const needle = query.trim().toUpperCase();
+  /** 새 라인 제안: 이 현장 라인들(최근 순)에서 바뀌는 번호 + 1. 예: 750A-5 → 750A-6, HJ-M-008-350A → HJ-M-009-350A */
+  const newLineIdeas = useMemo(() => suggestNextLines(linesByLatestDate(siteRecords).map((r) => r.line)), [siteRecords]);
   const lineChoices = useMemo(() => {
     const filtered = needle ? recent.filter((row) => row.line.toUpperCase().includes(needle)) : recent;
     return sortLineRows(filtered, "name");
@@ -712,7 +715,18 @@ export function EntryView() {
             <input className="field-input" value={query} placeholder="라인 검색" aria-label="라인 검색" onChange={(e) => setQuery(e.target.value)} />
             {addingLine ? (
               <>
-                <input className="field-input" value={lineDraft} placeholder="새 라인 번호" aria-label="새 라인 번호" onChange={(e) => setLineDraft(e.target.value)} onKeyDown={(e) => {
+                {newLineIdeas.length > 0 && (
+                  <div className="line-ideas">
+                    <div className="k">다음 라인 (누르면 바로 선택)</div>
+                    {newLineIdeas.map((idea) => (
+                      <button key={idea.line} className="choice" type="button" onClick={() => { void updateMeta({ activeLine: idea.line }); setLineDraft(""); setAddingLine(false); setLineOpen(false); }}>
+                        {idea.line}
+                      </button>
+                    ))}
+                    <div className="k">또는 아래 이름에서 끝만 고치세요</div>
+                  </div>
+                )}
+                <input className="field-input" value={lineDraft} autoFocus placeholder="새 라인 번호" aria-label="새 라인 번호" onChange={(e) => setLineDraft(e.target.value)} onKeyDown={(e) => {
                   if (e.key === "Enter" && lineDraft.trim()) {
                     void updateMeta({ activeLine: lineDraft.trim() });
                     setLineDraft("");
@@ -729,7 +743,7 @@ export function EntryView() {
                 }}>추가</button>
               </>
             ) : (
-              <button className="btn primary block" type="button" onClick={() => setAddingLine(true)}>+ 라인 추가</button>
+              <button className="btn primary block" type="button" onClick={() => { setLineDraft(meta.activeLine.trim() || lineChoices[0]?.line || ""); setAddingLine(true); }}>+ 라인 추가</button>
             )}
             <button className="btn block" type="button" onClick={() => setLineOpen(false)}>닫기</button>
           </div>
